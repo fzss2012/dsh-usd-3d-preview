@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Some exporters write a repeated run of modules as a custom-typed prim whose
+# fields are exactly UsdGeomPointInstancer's. OpenUSD only instantiates the
+# standard type, so the engine composes such a prim empty and every placement
+# disappears; `retypeCustomInstancers` (src/client/engine.js) renames the type on
+# the way in. Four placements of one quad, stacked in Y: the height is what
+# proves the instances were placed and not left at the origin.
+def Xform "root"
+{
+    def ModuleRow "row"
+    {
+        int[] protoIndices = [0, 0, 0, 0]
+        point3f[] positions = [(0, 0, 0), (0, 2, 0), (0, 4, 0), (0, 6, 0)]
+        rel prototypes = [ </root/row/Prototypes/proto> ]
+
+        def Scope "Prototypes"
+        {
+            def Xform "proto"
+            {
+                def Mesh "quad"
+                {
+                    uniform bool doubleSided = 1
+                    int[] faceVertexCounts = [3, 3]
+                    int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+                    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+                    uniform token subdivisionScheme = "none"
+                }
+            }
+        }
+    }
+}

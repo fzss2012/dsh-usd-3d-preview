@@ -1,0 +1,8 @@
+# Keep the repository at LF on every platform; the working tree follows.
+* text=auto eol=lf
+
+# USD containers may be binary — never transcode them.
+*.usd binary
+*.usdc binary
+*.usdz binary
+*.png binary

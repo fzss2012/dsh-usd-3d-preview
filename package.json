@@ -1,0 +1,56 @@
+{
+  "name": "dsh-usd-3d-preview",
+  "version": "1.0.0",
+  "description": "In-browser OpenUSD 3D preview: registers a document preview for .usd/.usda/.usdc/.usdz that composes the stage with a WebAssembly OpenUSD engine (composition arcs included) and draws it with three.js — no converter process, no upload, no native toolchain",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "openusd",
+    "usd",
+    "usdz",
+    "three.js",
+    "webassembly",
+    "3d",
+    "dsh",
+    "dsh-bundle",
+    "plugin"
+  ],
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node tests/run.mjs"
+  },
+  "devDependencies": {
+    "@huggingface/usd-web-viewer": "^0.2.0",
+    "esbuild": "^0.25.12",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.186.0"
+  }
+}

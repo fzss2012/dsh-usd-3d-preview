@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# build products (npm run build)
+lib/
+src/client/engine-assets.generated.js
+
+# test output
+tests/.artifacts/
+
+# misc
+*.log
+.DS_Store
+Thumbs.db
+
+# resolved locally by npm install (not shipped with the bundle)
+package-lock.json

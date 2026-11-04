@@ -1,0 +1,28 @@
+# dsh-usd-3d-preview — USD / 3D preview in the document panel (bundle patch layer)
+#
+# This file is the bundle's only patch entry (package.json `dsh.bundle.patch`).
+# `- insert:` appends one loader entry to the profile's root composition:
+#
+#   ui-usd-3d-preview → package dsh-usd-3d-preview
+#
+# That entry does two things:
+#   (1) it loads the host half `lib/index.js` (an empty plugin: this package has no
+#       host logic), which is also what lets client-modules discover `dsh.client`
+#       in package.json and serve `lib/client.js` as a browser module;
+#   (2) the browser half registers a `documentPreviews` implementation and the
+#       keyed `sidebar.right.tab.document` body.
+#
+# Parsing and composition both happen in the browser:
+#   · primary engine = @huggingface/usd-web-viewer (pure-Rust openusd compiled to
+#     WebAssembly, composition in a Web Worker, MIT). Referenced layers are read
+#     back through the workspace Remote and the stage is recomposed (the engine
+#     reports which layers it could not find);
+#   · fallback = the crate parser and composer shipped with three >= 0.186, used
+#     automatically when the WASM engine is unavailable.
+#
+# No realm / isolate is needed: this package publishes no service to the root
+# realm and only consumes the existing documentPreviews / slots / locale / remote
+# services. No configuration, no host route, no external converter process.
+- insert:
+    - id: ui-usd-3d-preview
+      name: dsh-usd-3d-preview

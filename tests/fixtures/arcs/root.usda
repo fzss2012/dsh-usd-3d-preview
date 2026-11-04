@@ -1,0 +1,18 @@
+﻿#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+    subLayers = [@./sub/base.usda@]
+)
+
+def Xform "root"
+{
+    def Xform "unit" (
+        prepend references = @./ref/body.usda@
+    )
+    {
+        double3 xformOp:translate = (3, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
