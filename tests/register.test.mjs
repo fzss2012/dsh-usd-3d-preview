@@ -75,7 +75,12 @@ const ctx = {
     workspaceFiles: {
       async readBytes(sessionId, path) {
         seen.reads.push({ sessionId, path })
-        return { data: new Uint8Array([1, 2, 3]), bytes: 3 }
+        // The Client Remote answers with a result envelope: the bytes are under
+        // `value`, and a failure (the layer is absent) is a non-ok result.
+        if (path === 'workspace/missing.usda') {
+          return { ok: false, error: { code: 'workspace-file/not-found', message: 'no such file', details: { path } } }
+        }
+        return { ok: true, value: { data: new Uint8Array([1, 2, 3]), bytes: 3 } }
       },
     },
   },
@@ -135,6 +140,13 @@ assert.equal(typeof injected.readLayer, 'function', 'no readLayer was injected')
 const layerBytes = await injected.readLayer('session-1', 'workspace/geom/body.usda', undefined)
 assert.deepEqual(seen.reads, [{ sessionId: 'session-1', path: 'workspace/geom/body.usda' }])
 assert.ok(layerBytes instanceof Uint8Array, 'the reader must unwrap the Remote result to bytes')
+assert.deepEqual([...layerBytes], [1, 2, 3], 'the reader must return the bytes, not the result envelope')
+// A read the Host refuses is a layer the engine reports as missing, not a throw.
+assert.equal(
+  await injected.readLayer('session-1', 'workspace/missing.usda', undefined),
+  undefined,
+  'a failed Remote read must resolve undefined',
+)
 
 assert.equal(seen.locales.length, 1)
 const [dictionary] = seen.locales
