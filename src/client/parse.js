@@ -21,6 +21,7 @@ import { unzipSync } from 'three/examples/jsm/libs/fflate.module.js'
 import { USDAParser } from 'three/examples/jsm/loaders/usd/USDAParser.js'
 import { USDCParser } from 'three/examples/jsm/loaders/usd/USDCParser.js'
 import { USDComposer } from 'three/examples/jsm/loaders/usd/USDComposer.js'
+import { readArticulation } from './articulation.js'
 import { layerBasePath, normalizePosix, referenceKey } from './usd.js'
 
 /** `PXR-USDC`, the binary crate header. */
@@ -157,7 +158,7 @@ export async function loadUsd({ bytes, readLayer, maxLayers = 24 }) {
   if (format === 'usdz') {
     const entries = unzipSync(bytes)
     const names = Object.keys(entries)
-    if (names.length === 0) throw new Error('USDZ 包是空的')
+    if (names.length === 0) throw new Error('the USDZ package is empty')
     const rootName = names[0]
     let rootData
     for (const name of names) {
@@ -172,7 +173,7 @@ export async function loadUsd({ bytes, readLayer, maxLayers = 24 }) {
       }
     }
     if (rootData === undefined) {
-      throw new Error(`USDZ 包的第一个条目 "${rootName}" 不是 USD 图层（规范要求包内首个条目即根层）`)
+      throw new Error(`the first entry of the USDZ package, "${rootName}", is not a USD layer (the spec requires the first entry to be the root layer)`)
     }
     const object = new USDComposer(manager).compose(rootData, assets, {}, layerBasePath(rootName))
     return { object, format, layers: names.length }
@@ -239,11 +240,12 @@ export async function loadUsd({ bytes, readLayer, maxLayers = 24 }) {
  * @param options.rootBytes - the opened file's bytes.
  * @param options.read - reads one workspace-relative path (engine path).
  * @param options.readSibling - reads a path relative to the opened file's directory (three path).
+ * @param options.readAsset - reads one `s3://` asset URI the engine localized into its package.
  * @param options.signal - aborts the load.
  * @param options.maxLayers - bound for the three fallback's reference walk.
  * @returns the graph, which engine produced it, the measured stats, and warnings.
  */
-export async function assemble({ rootKey, rootBytes, read, readSibling, signal, maxLayers = 24 }) {
+export async function assemble({ rootKey, rootBytes, read, readSibling, readAsset, signal, maxLayers = 24 }) {
   const format = usdFormatOf(rootBytes)
   // Escape hatch for a broken engine, without a setting or a rebuild:
   //   globalThis.__DSH_USD_ENGINE__ = 'three'
@@ -251,13 +253,32 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, signal, 
   if (engineAllowed && rootKey !== undefined && typeof read === 'function') {
     try {
       const { loadWithEngine } = await import('./engine.js')
-      const result = await loadWithEngine({ rootKey, rootBytes, read, signal })
+      const result = await loadWithEngine({ rootKey, rootBytes, read, readAsset, signal })
+      // Kinematics is not geometry: the engine composes the stage and drops the
+      // physics prims, so the articulated structure is read from the same bytes.
+      // A stage without any is the normal case, and costs one token scan. A stage
+      // that *has* physics and cannot be read keeps that fact, because a preview
+      // silently missing its parts is worse than one that says why.
+      let articulation
+      let articulationError
+      if (result.sources !== undefined) {
+        try {
+          articulation = await readArticulation(result.sources)
+        } catch (error) {
+          articulationError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      // Picking is the only reason to keep any vertex array on the CPU, so the
+      // engine's release stays untouched for every static stage.
+      if (articulation !== undefined) retainPickableAttributes(result.root)
       return {
         object: result.root,
         engine: 'wasm',
         format,
         layers: result.info.stats.layers,
         passes: result.passes,
+        articulation,
+        articulationError,
         warnings: result.info.warnings.map(warning => ({ ...warning })),
         stats: measureObject(result.root),
         // The engine owns textures too, so its own release is the complete one.
@@ -343,6 +364,37 @@ export function measureObject(object) {
     // honest signal that a layer assembled into nothing.
     degenerate: !finite,
   }
+}
+
+/**
+ * Keep the CPU copy of a clickable stage's vertex arrays.
+ *
+ * The engine drops every vertex array once it has uploaded it ("dead weight"
+ * after the GPU has it). That is the right trade for a static preview and the
+ * wrong one for an interactive stage: three's `Mesh.raycast` interpolates the
+ * position, normal and UV arrays of the triangle it hits, so with them gone the
+ * first pointer event throws inside the canvas listener and no click ever
+ * reaches the articulation controller. Every attribute is kept because which
+ * ones a geometry carries is the file's choice, and a hit interpolates all of
+ * them.
+ *
+ * Three's upload path calls `onUploadCallback()` unconditionally, so the hook is
+ * replaced with the prototype's own no-op rather than cleared to null.
+ * @param object - the assembled root about to be shown.
+ */
+function retainPickableAttributes(object) {
+  // One shared no-op for every attribute: three calls the hook on each upload, so
+  // it must stay callable, and a closure per attribute would be pure waste.
+  const noop = THREE.BufferAttribute.prototype.onUploadCallback
+  object.traverse((node) => {
+    const attributes = node.geometry?.attributes
+    if (attributes === undefined || attributes === null) return
+    for (const attribute of Object.values(attributes)) {
+      if (attribute !== undefined && attribute !== null && 'onUploadCallback' in attribute) {
+        attribute.onUploadCallback = noop
+      }
+    }
+  })
 }
 
 /**

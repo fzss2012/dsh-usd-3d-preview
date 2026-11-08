@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "root"
+{
+    def Xform "remote" (
+        prepend references = @https://example.com/bucket/body.usda@
+    )
+    {
+    }
+
+    def Xform "s3" (
+        prepend references = @s3://my-bucket/assets/chair.usd@
+    )
+    {
+    }
+}

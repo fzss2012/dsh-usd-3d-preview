@@ -15,10 +15,10 @@
  * scrollbar binding.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import * as THREE from 'three'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { createArticulationController } from './kinematics.js'
 import { assemble, disposeObject } from './parse.js'
-import { parseFileReference, siblingPath } from './usd.js'
+import { assetUriOf, parseFileReference, siblingPath, usdFileName } from './usd.js'
+import { createView } from './view.js'
 
 const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
 const LABEL_DIM = 'var(--dsw-alias-label-secondary, #a9b0bd)'
@@ -146,120 +146,6 @@ function length(value) {
 }
 
 /**
- * Build the orbit viewport for one assembled root.
- * @param container - the positioned element the canvas fills.
- * @param object - the assembled root, parented nowhere yet.
- * @returns the live view, with its own teardown.
- */
-function createView(container, object) {
-  const width = Math.max(container.clientWidth, 1)
-  const height = Math.max(container.clientHeight, 1)
-
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
-  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2))
-  renderer.setSize(width, height, false)
-  const canvas = renderer.domElement
-  canvas.style.display = 'block'
-  canvas.style.width = '100%'
-  canvas.style.height = '100%'
-  canvas.style.touchAction = 'none'
-  canvas.dataset.usdPreviewCanvas = ''
-  container.appendChild(canvas)
-
-  const scene = new THREE.Scene()
-  const perspective = new THREE.PerspectiveCamera(45, width / height, 0.01, 1e6)
-
-  const controls = new OrbitControls(perspective, canvas)
-  controls.enableDamping = true
-  controls.dampingFactor = 0.08
-  controls.screenSpacePanning = true
-  controls.autoRotateSpeed = 1.2
-
-  // USD ships no lighting rig of its own, so the viewport supplies a neutral
-  // three-point setup: enough to read form without inventing a material the file
-  // never had. Stage materials from the composer sit on top of it.
-  scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x2b2f38, 1.5))
-  const key = new THREE.DirectionalLight(0xffffff, 2.4)
-  key.position.set(4, 7, 6)
-  scene.add(key)
-  const fill = new THREE.DirectionalLight(0xffffff, 1.0)
-  fill.position.set(-6, -3, -5)
-  scene.add(fill)
-  const rim = new THREE.DirectionalLight(0xffffff, 0.8)
-  rim.position.set(-2, 4, -7)
-  scene.add(rim)
-
-  const box = new THREE.Box3().setFromObject(object)
-  const empty = box.isEmpty()
-  const size = empty ? new THREE.Vector3(1, 1, 1) : box.getSize(new THREE.Vector3())
-  const center = empty ? new THREE.Vector3() : box.getCenter(new THREE.Vector3())
-  const radius = Math.max(size.length() * 0.5, 1e-4)
-
-  const grid = new THREE.GridHelper(radius * 4, 24, 0x7c8698, 0x4a5162)
-  grid.position.set(center.x, empty ? 0 : box.min.y, center.z)
-  grid.material.transparent = true
-  grid.material.opacity = 0.35
-  scene.add(grid)
-  scene.add(object)
-
-  const reset = () => {
-    const distance = radius / Math.sin((perspective.fov * Math.PI) / 360)
-    perspective.position.copy(center).addScaledVector(
-      new THREE.Vector3(1, 0.62, 1).normalize(),
-      distance * 1.2,
-    )
-    perspective.near = Math.max(distance / 5000, 1e-4)
-    perspective.far = distance * 200
-    perspective.updateProjectionMatrix()
-    controls.target.copy(center)
-    controls.minDistance = radius * 0.02
-    controls.maxDistance = distance * 20
-    controls.update()
-  }
-  reset()
-
-  const resize = () => {
-    const nextWidth = Math.max(container.clientWidth, 1)
-    const nextHeight = Math.max(container.clientHeight, 1)
-    renderer.setSize(nextWidth, nextHeight, false)
-    perspective.aspect = nextWidth / nextHeight
-    perspective.updateProjectionMatrix()
-  }
-  const observer = new ResizeObserver(resize)
-  observer.observe(container)
-
-  renderer.setAnimationLoop(() => {
-    controls.update()
-    renderer.render(scene, perspective)
-  })
-
-  return {
-    grid,
-    reset,
-    setSpin(on) { controls.autoRotate = on === true },
-    setWireframe(on) {
-      object.traverse((node) => {
-        const material = node.material
-        if (Array.isArray(material)) {
-          for (const entry of material) if (entry !== undefined && entry !== null) entry.wireframe = on === true
-        } else if (material !== undefined && material !== null) {
-          material.wireframe = on === true
-        }
-      })
-    },
-    destroy() {
-      renderer.setAnimationLoop(null)
-      observer.disconnect()
-      controls.dispose()
-      scene.remove(object)
-      scene.clear()
-      renderer.dispose()
-      canvas.remove()
-    },
-  }
-}
-
-/**
  * Present one USD file as an interactive 3D viewport.
  * @param props - the document body's standard props: complete bytes, address,
  * copy, and the injected workspace reader for referenced layers.
@@ -269,22 +155,31 @@ export function UsdBody(props) {
   const { content, resourceAddress } = props
   const t = props.t
   const data = content !== undefined && content.kind === 'bytes' ? content.data : undefined
+  const name = usdFileName(resourceAddress)
   const containerRef = useRef(null)
   const viewRef = useRef(null)
   // The reader is registration-scoped, not render-scoped: keeping it in a ref
   // stops a new function identity from re-assembling the file on every render.
   const readerRef = useRef(props.readLayer)
   readerRef.current = props.readLayer
+  // The asset reader is what makes `s3://` references resolvable: the engine
+  // names such a layer, the injected reader fetches it, the engine composes.
+  const assetReaderRef = useRef(props.readAsset)
+  assetReaderRef.current = props.readAsset
   const [parsed, setParsed] = useState(null)
   const [failure, setFailure] = useState(null)
   const [showGrid, setShowGrid] = useState(true)
   const [spin, setSpin] = useState(false)
   const [wireframe, setWireframe] = useState(false)
+  // Which end of its travel the parts were last asked to reach: the controller
+  // owns the animation, this only decides which word the button shows.
+  const [partsOpen, setPartsOpen] = useState(false)
+  const [colliders, setColliders] = useState(false)
 
   /**
    * Dictionary lookup with a literal fallback: copy must never be the reason a
-   * viewport fails to render, so a missing namespace degrades to the built-in
-   * English copy rather than to a bare key.
+   * viewport fails to render, so a missing namespace degrades to the English
+   * default rather than to a bare key.
    */
   const label = useCallback((key, fallback) => {
     if (typeof t !== 'function') return fallback
@@ -315,8 +210,17 @@ export function UsdBody(props) {
         const readWorkspace = reference === undefined || readerRef.current === undefined
           ? async () => undefined
           : (path, signal) => readerRef.current(reference.sessionId, path, signal)
-        // One reader for the engine: every key the engine reports as missing is a
-        // workspace path, and the session in the address is what can read it.
+        // One reader for the engine: `s3://` keys are asset reads through the
+        // injected callback, everything else is a workspace file. The engine
+        // reports both kinds in the same "layer-missing" list, so they need one
+        // door.
+        const readFile = async (path, signal) => {
+          const asset = assetUriOf(path)
+          if (asset !== undefined && assetReaderRef.current !== undefined) {
+            return assetReaderRef.current(asset.uri, signal)
+          }
+          return readWorkspace(path, signal)
+        }
         // The engine resolves references against the opened file's own path, so
         // it is handed workspace paths; the three fallback keeps the older
         // "relative to the opened file's directory" reader.
@@ -326,14 +230,28 @@ export function UsdBody(props) {
         const result = await assemble({
           rootKey: reference?.path,
           rootBytes: data,
-          read: readWorkspace,
+          read: readFile,
           readSibling,
+          // The engine localizes `s3://` references into its file package; this is
+          // the read callback that fills them in.
+          readAsset: assetReaderRef.current,
           signal: controller.signal,
         })
         if (cancelled) {
           if (result.dispose !== undefined) result.dispose()
           else disposeObject(result.object)
           return
+        }
+        // Bound before the view exists, so the first frame already shows the
+        // bodies in their rest pose instead of re-parenting them a frame later.
+        // A stage that declares parts but cannot be bound still previews: the
+        // geometry is the file, the articulation is an extra.
+        if (result.articulation !== undefined) {
+          try {
+            result.parts = createArticulationController(result.object, result.articulation)
+          } catch (error) {
+            result.articulationError = error instanceof Error ? error.message : String(error)
+          }
         }
         setParsed(result)
       } catch (error) {
@@ -353,13 +271,29 @@ export function UsdBody(props) {
     if (parsed === null || container === null) return undefined
     let view
     try {
-      view = createView(container, parsed.object)
+      // An articulated stage is framed to cover the poses its joints reach, so
+      // "Open all" cannot swing a part out of the viewport; a static stage passes
+      // nothing and is framed by its own extent.
+      view = createView(container, parsed.object, { frame: parsed.parts?.extremeBounds?.() })
     } catch (error) {
       setFailure(error instanceof Error ? error.message : String(error))
       return undefined
     }
     viewRef.current = view
+    // The view knows nothing about joints and the controller knows nothing about
+    // rendering: each is connected here, by the half that owns both.
+    const parts = parsed.parts
+    // The tick answers "do you need another frame?", which is what keeps an
+    // idle articulated asset idle instead of rendering forever.
+    const stopFrame = parts === undefined
+      ? undefined
+      : view.onFrame(deltaMs => parts.tick(deltaMs) === true)
+    const stopPick = parts === undefined
+      ? undefined
+      : view.onPick((hits) => { if (parts.pick(hits) === true) view.requestRender() })
     return () => {
+      stopFrame?.()
+      stopPick?.()
       viewRef.current = null
       view.destroy()
     }
@@ -368,6 +302,13 @@ export function UsdBody(props) {
   // The graph is released with its viewport, whether or not one was ever built.
   useEffect(() => () => {
     if (parsed === null) return
+    // Bodies first: the controller put meshes under groups it owns, and it must
+    // take them back out before the geometry they share is freed.
+    try {
+      parsed.parts?.dispose?.()
+    } catch {
+      // A controller that cannot unwind must not keep the geometry alive too.
+    }
     // The engine owns its textures as well as its geometry, so prefer its release.
     if (parsed.dispose !== undefined) parsed.dispose()
     else disposeObject(parsed.object)
@@ -375,7 +316,7 @@ export function UsdBody(props) {
 
   useEffect(() => {
     const view = viewRef.current
-    if (view !== null) view.grid.visible = showGrid
+    if (view !== null) view.setGridVisible(showGrid)
   }, [showGrid, parsed])
   useEffect(() => {
     viewRef.current?.setSpin(spin)
@@ -401,7 +342,13 @@ export function UsdBody(props) {
   // a missing layer, an unsupported prim, a material that fell back to grey.
   const engineWarnings = parsed?.warnings ?? []
   if (parsed?.engine === 'three' && parsed.engineError !== undefined) {
-    notices.push(`${label('engineFallback', 'The WASM engine was unavailable; fell back to the three.js parser:')} ${parsed.engineError}`)
+    const fallback = label('engineFallback', 'The WASM engine was unavailable; fell back to the three.js parser:')
+    notices.push(`${fallback} ${parsed.engineError}`)
+  }
+  // A stage may declare moving parts the reader could not reconstruct. Saying so
+  // is the difference between "static asset" and "we lost its kinematics".
+  if (parsed?.articulationError !== undefined) {
+    notices.push(`${label('articulationFailed', 'The moving parts could not be read')}: ${parsed.articulationError}`)
   }
 
   const stats = parsed === null ? undefined : [
@@ -415,8 +362,22 @@ export function UsdBody(props) {
     ...(engineWarnings.length === 0 ? [] : [`${label('warnings', 'Warnings')}: ${engineWarnings.length}`]),
   ].join('\n')
 
+  // The articulated structure, when the stage declared one. A static stage has no
+  // joints, so no control below may claim anything about parts.
+  const parts = parsed?.parts ?? undefined
+  const partsHint = parts === undefined
+    ? undefined
+    : `${parts.movingParts} ${label('movingParts', 'Moving parts')} · ${label('pickPart', 'Click a part to open or close it')}`
+
   return (
-    <div style={SHELL} data-usd-preview data-usd-engine={parsed?.engine ?? ''} data-usd-engine-error={parsed?.engineError ?? ''}>
+    <div
+      style={SHELL}
+      data-usd-preview
+      data-usd-engine={parsed?.engine ?? ''}
+      data-usd-engine-error={parsed?.engineError ?? ''}
+      data-usd-parts={parts === undefined ? 0 : parts.movingParts}
+      data-usd-colliders={parts?.hasColliders === true ? '1' : '0'}
+    >
       <div ref={containerRef} style={CANVAS} data-usd-preview-stage />
       {failure !== null && (
         <div style={CENTERED} role="alert">
@@ -434,6 +395,50 @@ export function UsdBody(props) {
       {parsed !== null && (
         <>
           <div style={TOOLBAR}>
+            {parts !== undefined && parts.movingParts > 0 && (
+              <button
+                type="button"
+                style={buttonStyle(partsOpen)}
+                data-usd-parts-toggle
+                onClick={() => {
+                  const open = !partsOpen
+                  setPartsOpen(open)
+                  parts.setAll(open)
+                  viewRef.current?.requestRender()
+                }}
+              >
+                {partsOpen ? label('closeAll', 'Close all') : label('openAll', 'Open all')}
+              </button>
+            )}
+            {parts !== undefined && parts.movingParts > 0 && (
+              <button
+                type="button"
+                style={buttonStyle(false)}
+                data-usd-parts-home
+                onClick={() => {
+                  setPartsOpen(false)
+                  parts.home()
+                  viewRef.current?.requestRender()
+                }}
+              >
+                {label('homeParts', 'Home parts')}
+              </button>
+            )}
+            {parts !== undefined && parts.hasColliders && (
+              <button
+                type="button"
+                style={buttonStyle(colliders)}
+                data-usd-parts-colliders
+                onClick={() => {
+                  const visible = !colliders
+                  setColliders(visible)
+                  parts.setCollidersVisible(visible)
+                  viewRef.current?.requestRender()
+                }}
+              >
+                {label('colliders', 'Colliders')}
+              </button>
+            )}
             <button type="button" style={buttonStyle(false)} onClick={reset} data-usd-reset>
               {label('reset', 'Reset view')}
             </button>
@@ -447,7 +452,10 @@ export function UsdBody(props) {
               {label('wireframe', 'Wireframe')}
             </button>
           </div>
-          <div style={HINT}>{label('help', 'Drag to orbit · wheel to zoom · right-drag to pan')}</div>
+          <div style={HINT}>
+            {label('help', 'Drag to orbit · wheel to zoom · right-drag to pan')}
+            {partsHint === undefined ? '' : <div style={{ marginTop: 2 }} data-usd-parts-hint>{partsHint}</div>}
+          </div>
           {stats !== undefined && <div style={STATS} data-usd-stats>{stats}</div>}
           {engineWarnings.length > 0 && (
             <div style={WARNINGS} data-usd-warnings>

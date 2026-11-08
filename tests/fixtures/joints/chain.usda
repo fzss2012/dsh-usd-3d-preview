@@ -1,0 +1,91 @@
+#usda 1.0
+(
+    defaultPrim = "Chain"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A three-body chain with two revolute joints: base -> arm -> hand. Forward
+# kinematics has to compose, not just rotate one body: the hand pose depends on
+# the arm pose, and the joint frames have to stay coincident at any travel.
+
+def Xform "Chain"
+{
+    def Xform "Bodies"
+    {
+        def Xform "base"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 5
+            def Mesh "plate"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(-0.2, 0, -0.2), (0.2, 0, -0.2), (0.2, 0, 0.2), (-0.2, 0, 0.2), (-0.2, 0.1, -0.2), (0.2, 0.1, -0.2), (0.2, 0.1, 0.2), (-0.2, 0.1, 0.2)]
+            }
+        }
+
+        def Xform "arm"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 3
+            def Mesh "beam"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(0, -0.05, -0.05), (1, -0.05, -0.05), (1, -0.05, 0.05), (0, -0.05, 0.05), (0, 0.05, -0.05), (1, 0.05, -0.05), (1, 0.05, 0.05), (0, 0.05, 0.05)]
+            }
+        }
+
+        def Xform "hand"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (2, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 1
+            def Mesh "claw"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(0, -0.05, -0.1), (0.2, -0.05, -0.1), (0.2, -0.05, 0.1), (0, -0.05, 0.1), (0, 0.05, -0.1), (0.2, 0.05, -0.1), (0.2, 0.05, 0.1), (0, 0.05, 0.1)]
+            }
+        }
+    }
+
+    def PhysicsRevoluteJoint "j0"
+    {
+        uniform token physics:axis = "Z"
+        float physics:lowerLimit = -45
+        float physics:upperLimit = 45
+        point3f physics:localPos0 = (1, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        rel physics:body0 = </Chain/Bodies/base>
+        rel physics:body1 = </Chain/Bodies/arm>
+    }
+
+    def PhysicsRevoluteJoint "j1"
+    {
+        uniform token physics:axis = "Z"
+        float physics:lowerLimit = -45
+        float physics:upperLimit = 45
+        point3f physics:localPos0 = (1, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        rel physics:body0 = </Chain/Bodies/arm>
+        rel physics:body1 = </Chain/Bodies/hand>
+    }
+
+}

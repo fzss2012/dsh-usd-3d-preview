@@ -1,7 +1,7 @@
 {
   "name": "dsh-usd-3d-preview",
-  "version": "1.0.0",
-  "description": "In-browser OpenUSD 3D preview: registers a document preview for .usd/.usda/.usdc/.usdz that composes the stage with a WebAssembly OpenUSD engine (composition arcs included) and draws it with three.js — no converter process, no upload, no native toolchain",
+  "version": "2.0.0",
+  "description": "In-browser OpenUSD 3D preview for the DeepSeek Harness sidebar: registers a document preview for .usd/.usda/.usdc/.usdz, composes the stage with a WebAssembly OpenUSD engine (composition arcs included), renders it with three.js in a studio-lit viewport, and makes authored UsdPhysics joints and colliders interactive. Optional read-only S3-compatible asset-library support for `s3://` references. No converter process, no upload, no native toolchain",
   "type": "module",
   "license": "MIT",
   "keywords": [

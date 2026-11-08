@@ -1,0 +1,89 @@
+#usda 1.0
+(
+    defaultPrim = "Door"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A hinged door: a fixed frame and a swinging leaf, one revolute joint about Y
+# through the hinge, limits -90..90 degrees (USD authors revolute limits in
+# degrees). Every part is a closed box, so the leaf is visible and clickable from
+# any camera angle, and the leaf mesh reaches 0.9 m from its body origin: a
+# controller that rotated about the body origin instead of the joint frame would
+# be wrong by that much at the far edge.
+#
+# The hull under /collision is authored the way physics authoring pipelines mark
+# collision proxies -- purpose = "guide" -- so the engine never draws it and only
+# the controller overlay can show it.
+
+def Xform "Door"
+{
+    def Xform "Bodies"
+    {
+        def Xform "frame"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 12
+            token simready:role = "fixed"
+            def Mesh "post"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(-0.05, 0, -1.22), (0.05, 0, -1.22), (0.05, 0, -1.18), (-0.05, 0, -1.18), (-0.05, 2, -1.22), (0.05, 2, -1.22), (0.05, 2, -1.18), (-0.05, 2, -1.18)]
+            }
+
+            def Xform "leaf"
+            (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+            )
+            {
+                double3 xformOp:translate = (0, 1, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                float physics:mass = 4
+                def Mesh "panel"
+                {
+                    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                    int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                    point3f[] points = [(0, -0.5, -0.02), (0.9, -0.5, -0.02), (0.9, -0.5, 0.02), (0, -0.5, 0.02), (0, 0.5, -0.02), (0.9, 0.5, -0.02), (0.9, 0.5, 0.02), (0, 0.5, 0.02)]
+                }
+
+                def Scope "collision"
+                {
+                    def Mesh "c0000"
+                    (
+                        prepend apiSchemas = ["PhysicsCollisionAPI"]
+                    )
+                    {
+                        uniform token purpose = "guide"
+                        token physics:approximation = "convexHull"
+                        bool physics:collisionEnabled = 1
+                        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                        int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                        point3f[] points = [(0, -0.5, -0.04), (0.9, -0.5, -0.04), (0.9, -0.5, 0), (0, -0.5, 0), (0, 0.5, -0.04), (0.9, 0.5, -0.04), (0.9, 0.5, 0), (0, 0.5, 0)]
+                    }
+                }
+            }
+        }
+    }
+
+    def PhysicsRevoluteJoint "hinge"
+    (
+        prepend apiSchemas = ["PhysicsDriveAPI:angular"]
+    )
+    {
+        uniform token physics:axis = "Y"
+        float physics:lowerLimit = -90
+        float physics:upperLimit = 90
+        point3f physics:localPos0 = (0, 1, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        rel physics:body0 = </Door/Bodies/frame>
+        rel physics:body1 = </Door/Bodies/frame/leaf>
+    }
+
+}
