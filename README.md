@@ -276,6 +276,8 @@ and compare screenshots in-process (`tests/pixel-probe.mjs`), so no Python/Pillo
 
 Panel screenshots for a release or review can be captured from the same harness with
 `node tests/capture.mjs` — see [docs/screenshots/README.md](docs/screenshots/README.md).
+`node tests/record-demo.mjs` records a captioned GIF of the scripted joint interaction
+(requires the two small encoders listed there; the committed GIFs are in `docs/screenshots/`).
 
 Fixtures: `tests/fixtures/sample.{usda,usd,usdc,usdz}` are four containers of one scene
 exported by Blender (`tests/make-fixtures.py` regenerates them); `refs/unit.usda →

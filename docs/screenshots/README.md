@@ -33,3 +33,35 @@ The panel differences visible in the before/after pairs are the studio lighting
 (tone mapping, real shadows, lit ground disc), the on-demand view framing, and the
 reworked toolbar; composition results (layer/mesh/triangle/size stats) are
 unchanged for every scenario.
+
+## Joint-interaction demos (GIF)
+
+The test suites assert the interaction in code; these GIFs are the human-readable
+counterpart, recorded from the real panel in Chromium with the same render
+harness. Each caption names the stage of the scripted interaction.
+
+- `articulation-demo.gif` — `joints/mixed.usda`: one stage with a revolute hinge,
+  a prismatic slide and a fixed bolt. Steps: rest pose → All open → Home → click
+  the hinged panel → click the sliding tray → collider overlay on/off → Home.
+  This is the "more detailed joint interaction" evidence: the two drivable parts
+  move independently, the fixed part follows its parent instead of being driven,
+  and the collider geometry is an overlay that can be toggled.
+- `articulation-demo-prismatic.gif` — `joints/drawer.usda`: a single prismatic
+  joint over its authored travel (rest → All open → Home → click the part).
+
+The software rasterizer used in this environment paints only a few frames per
+second, so the motion is deliberately step-captioned rather than relying on a
+smooth high-fps recording; the rendered panels themselves are the real
+application component.
+
+Reproduce (requires Playwright + Chromium and two small encoders, not package
+dependencies):
+
+```bash
+npm install --no-save playwright gifenc jpeg-js
+npx playwright install chromium
+node tests/record-demo.mjs --fixture joints/mixed.usda \
+  --clicks "0.40,0.42;0.57,0.75" --out docs/screenshots/articulation-demo.gif
+node tests/record-demo.mjs --fixture joints/drawer.usda \
+  --clicks "0.52,0.5" --out docs/screenshots/articulation-demo-prismatic.gif
+```

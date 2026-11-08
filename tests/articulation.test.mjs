@@ -13,9 +13,15 @@
  *     whose stage-space matrix changed would jump on load, and one whose pivot
  *     was taken from the body origin instead of the joint frame would swing
  *     about the wrong point;
- *   * that interaction is reversible — open/close, home, pick and dispose all
- *     have to end where they started, because the caller frees the geometry
- *     right after dispose.
+ *   * that interaction is reversible and independent — open/close, home,
+ *     all-open/all-close, limit clamping, fixed joints, multi-part stages,
+ *     colliders and pick hit/miss all have to end where they started, because
+ *     the caller frees the geometry right after dispose.
+ *
+ * The interaction section is deliberately a state machine: every click is
+ * followed by a pose assertion (not just "pixels changed"), every sequence has a
+ * defined endpoint, and a fresh controller is bound for each scenario so one
+ * scenario cannot hide a leak in another.
  *
  * Run: node tests/articulation.test.mjs
  */
@@ -104,6 +110,106 @@ function settle(parts, step = 16, limit = 20000) {
   }
   return elapsed
 }
+
+/** The eight corners of an axis-aligned box, for geometry that needs real extent. */
+function boxPoints(minX, minY, minZ, maxX, maxY, maxZ) {
+  const points = []
+  for (const x of [minX, maxX]) {
+    for (const y of [minY, maxY]) {
+      for (const z of [minZ, maxZ]) points.push(x, y, z)
+    }
+  }
+  return points
+}
+
+/** Every vertex of the named meshes, in stage space, at the current pose. */
+function stageVertices(root, names) {
+  root.updateMatrixWorld(true)
+  const points = []
+  for (const name of names) {
+    const node = root.getObjectByName(name)
+    assert.ok(node !== undefined, name + ': the mesh disappeared')
+    const position = node.geometry.getAttribute('position')
+    const matrix = stageMatrixOf(root, node)
+    for (let index = 0; index < position.count; index += 1) {
+      points.push(new THREE.Vector3().fromBufferAttribute(position, index).applyMatrix4(matrix))
+    }
+  }
+  return points
+}
+
+/** Assert every point is inside a plain { min, max } envelope. */
+function assertInsideEnvelope(box, points, label) {
+  for (const point of points) {
+    const inside = point.x >= box.min[0] - 1e-6 && point.x <= box.max[0] + 1e-6
+      && point.y >= box.min[1] - 1e-6 && point.y <= box.max[1] + 1e-6
+      && point.z >= box.min[2] - 1e-6 && point.z <= box.max[2] + 1e-6
+    assert.ok(inside, label + ': vertex ' + point.toArray().map(value => value.toFixed(4)).join(', ') + ' left the envelope')
+  }
+}
+
+/** The meshes of the mixed fixture, at their authored rest transforms. */
+const MIXED_MESHES = [
+  { name: '/Mixed/Bodies/base/mount', matrix: translation(0, 0, 0), points: boxPoints(-0.15, 0, -0.15, 0.15, 0.2, 0.15) },
+  { name: '/Mixed/Bodies/leaf/panel', matrix: translation(0, 1, 0), points: boxPoints(0, -0.5, -0.02, 0.9, 0.5, 0.02) },
+  { name: '/Mixed/Bodies/tray/front', matrix: translation(1.5, 0.2, 0), points: boxPoints(-0.15, -0.15, -0.3, 0.15, 0.15, 0.3) },
+  { name: '/Mixed/Bodies/plate/board', matrix: translation(0.6, 1.5, 0.6), points: boxPoints(-0.3, -0.25, -0.05, 0.3, 0.25, 0.05) },
+]
+
+/** A fresh mixed stage: one revolute leaf, one prismatic tray, one fixed plate. */
+function makeMixedScene() {
+  return sceneOf(MIXED_MESHES.map(entry => ({ ...entry })))
+}
+
+/** The meshes of the drawer fixture, at their authored rest transforms. */
+const DRAWER_MESHES = [
+  { name: '/Drawer/Bodies/carcass/shell', matrix: translation(0, 0, 0), points: boxPoints(-0.4, 0, -0.3, 0.6, 0.4, 0.3) },
+  { name: '/Drawer/Bodies/tray/front', matrix: translation(0.05, 0.2, 0), points: boxPoints(0, -0.15, -0.25, 0.02, 0.15, 0.25) },
+]
+
+/** A fresh drawer stage. */
+function makeDrawerScene() {
+  return sceneOf(DRAWER_MESHES.map(entry => ({ ...entry })))
+}
+
+/** The meshes of the chain fixture, at their authored rest transforms. */
+const CHAIN_MESHES = [
+  { name: '/Chain/Bodies/base/plate', matrix: translation(0, 0, 0), points: boxPoints(-0.2, 0, -0.2, 0.2, 0.1, 0.2) },
+  { name: '/Chain/Bodies/arm/beam', matrix: translation(1, 0, 0), points: boxPoints(0, -0.05, -0.05, 1, 0.05, 0.05) },
+  { name: '/Chain/Bodies/hand/claw', matrix: translation(2, 0, 0), points: boxPoints(0, -0.05, -0.1, 0.2, 0.05, 0.1) },
+]
+
+/** A fresh chain stage. */
+function makeChainScene() {
+  return sceneOf(CHAIN_MESHES.map(entry => ({ ...entry })))
+}
+
+/** Stage-space matrix of a body group the controller created for a prim path. */
+function bodyStageMatrix(root, path) {
+  const group = bodyGroup(root, path)
+  assert.ok(group !== undefined, path + ': no body group exists')
+  return stageMatrixOf(root, group)
+}
+
+/** Assert every named body's mesh still sits at its recorded rest pose. */
+function assertRestPose(root, restMatrices, epsilon, label) {
+  root.updateMatrixWorld(true)
+  for (const [name, expected] of restMatrices) {
+    const node = root.getObjectByName(name)
+    assert.ok(node !== undefined, label + ': ' + name + ' disappeared')
+    assertMatrixClose(stageMatrixOf(root, node), expected, epsilon, label + ': ' + name + ': rest pose changed')
+  }
+}
+
+/** Record every mesh's stage-space pose before a controller is bound. */
+function snapshotStage(root) {
+  root.updateMatrixWorld(true)
+  const poses = new Map()
+  root.traverse((node) => { if (node.isMesh === true) poses.set(node.name, stageMatrixOf(root, node)) })
+  return poses
+}
+
+// Keep `mixed` reachable from the interaction sections that follow.
 
 const lines = []
 function say(line) {
@@ -440,6 +546,499 @@ while (idleParts.tick(16) === true && frames < 500) frames += 1
 const frameMicros = ((performance.now() - movingStart) * 1000) / Math.max(1, frames)
 idleParts.dispose()
 say('controller cost        idle tick ' + idleMicros.toFixed(2) + ' us  moving tick ' + frameMicros.toFixed(1) + ' us  (' + frames + ' frames)')
+
+// ── the mixed fixture: three joint types on one stage ──────────────────────
+
+/** Assert a three-element vector is close to an expected one. */
+function assertVectorClose(actual, expected, epsilon, label) {
+  for (const axis of ['x', 'y', 'z']) {
+    assert.ok(Math.abs(actual[axis] - expected[axis]) <= epsilon,
+      label + ': ' + axis + ' is ' + actual[axis].toFixed(6) + ', expected ' + expected[axis])
+  }
+}
+
+const mixed = await readFixture('mixed.usda')
+assert.ok(mixed !== undefined, 'mixed.usda: no articulation read')
+assert.equal(mixed.kind, 'usdphysics')
+assert.deepEqual(mixed.bodies.map(body => body.name), ['base', 'leaf', 'tray', 'plate'], 'mixed.usda: body order')
+assert.equal(mixed.joints.length, 3, 'mixed.usda: revolute + prismatic + fixed')
+const [mixedHinge, mixedSlide, mixedBolt] = mixed.joints
+assert.equal(mixedHinge.type, 'revolute', 'mixed.usda: hinge type')
+assert.equal(mixedHinge.unit, 'deg')
+// The authored open pose (simready:far = 120) is outside the travel limit and
+// must come back clamped to the limit, not to the authored number.
+assert.deepEqual([mixedHinge.lower, mixedHinge.upper], [-60, 60], 'mixed.usda: revolute limits')
+assert.equal(mixedHinge.open, 60, 'mixed.usda: authored open pose is clamped to the revolute limit')
+assert.equal(mixedHinge.opens, 'open')
+assert.deepEqual(mixedHinge.axis, [0, 1, 0])
+assert.ok(Math.abs(mixedHinge.pivot[0]) < 1e-9 && Math.abs(mixedHinge.pivot[1] - 1) < 1e-9 && Math.abs(mixedHinge.pivot[2]) < 1e-9,
+  'mixed.usda: hinge pivot')
+assert.equal(mixedHinge.body0, '/Mixed/Bodies/base')
+assert.equal(mixedHinge.body1, '/Mixed/Bodies/leaf')
+assert.equal(mixedSlide.type, 'prismatic', 'mixed.usda: slide type')
+assert.equal(mixedSlide.unit, 'base')
+assert.deepEqual([mixedSlide.lower, mixedSlide.upper], [0, 0.3], 'mixed.usda: linear limits')
+assert.equal(mixedSlide.open, 0.3, 'mixed.usda: authored open pose is clamped to the prismatic limit')
+assert.deepEqual(mixedSlide.axis, [1, 0, 0])
+assert.deepEqual(mixedSlide.pivot.map(value => Number(value.toFixed(6))), [1.5, 0.2, 0], 'mixed.usda: slide pivot')
+assert.equal(mixedBolt.type, 'fixed', 'mixed.usda: bolt type')
+assert.deepEqual([mixedBolt.lower, mixedBolt.upper, mixedBolt.home, mixedBolt.open], [0, 0, 0, 0], 'mixed.usda: a fixed joint has no travel')
+assert.deepEqual(mixed.roots, ['/Mixed/Bodies/base'], 'mixed.usda: one root')
+assert.deepEqual(mixed.tree.map(edge => [edge.parent, edge.child]), [
+  ['/Mixed/Bodies/base', '/Mixed/Bodies/leaf'],
+  ['/Mixed/Bodies/base', '/Mixed/Bodies/tray'],
+  ['/Mixed/Bodies/base', '/Mixed/Bodies/plate'],
+], 'mixed.usda: tree edges')
+assert.deepEqual(mixed.warnings, [], 'mixed.usda: warnings')
+assert.equal(mixed.colliders.length, 1, 'mixed.usda: one authored collision hull')
+assert.equal(mixed.colliders[0].body, '/Mixed/Bodies/leaf')
+assert.equal(mixed.colliders[0].indices.length / 3, 12, 'mixed.usda: a box hull is 12 triangles')
+assert.ok(Math.abs(mixed.colliders[0].positions[1] - 0.5) < 1e-6, 'mixed.usda: collider was not baked into stage space')
+say('fixture mixed.usda    4 bodies  1 revolute + 1 prismatic + 1 fixed, open poses clamped to limits, 1 collider')
+
+// ── mixed controller: two drivable parts, a fixed joint that never moves ───
+
+const mixedRoot = makeMixedScene()
+const mixedRest = snapshotStage(mixedRoot)
+const mixedParts = createArticulationController(mixedRoot, mixed)
+assert.ok(mixedParts !== undefined, 'mixed: the controller refused to bind')
+assert.equal(mixedParts.movingParts, 2, 'mixed: two drivable joints (the fixed bolt is not one)')
+assert.equal(mixedParts.hasColliders, true, 'mixed: hasColliders')
+assertRestPose(mixedRoot, mixedRest, 1e-9, 'mixed bind')
+const mixedLeaf = mixedRoot.getObjectByName('/Mixed/Bodies/leaf/panel')
+const mixedTray = mixedRoot.getObjectByName('/Mixed/Bodies/tray/front')
+const mixedPlate = mixedRoot.getObjectByName('/Mixed/Bodies/plate/board')
+const mixedLeafBodyPose = () => bodyStageMatrix(mixedRoot, '/Mixed/Bodies/leaf')
+const mixedTrayPose = () => bodyStageMatrix(mixedRoot, '/Mixed/Bodies/tray')
+const mixedPlatePose = () => bodyStageMatrix(mixedRoot, '/Mixed/Bodies/plate')
+const mixedLeafCorner = () => stagePointOf(mixedRoot, mixedLeaf, 0.9, -0.5, 0)
+const mixedTrayOrigin = () => new THREE.Vector3().setFromMatrixPosition(mixedTrayPose())
+const mixedPlateRest = mixedPlatePose().clone()
+const mixedBaseRest = bodyStageMatrix(mixedRoot, '/Mixed/Bodies/base').clone()
+
+// Both drivable joints reach their clamped limits; the fixed body does not move.
+mixedParts.setAll(true)
+assert.equal(mixedParts.tick(0), true, 'mixed: tick must report motion right after all-open')
+const mixedOpenElapsed = settle(mixedParts)
+const mixedCorner = mixedLeafCorner()
+assert.ok(Math.abs(mixedCorner.x - 0.45) < 1e-6 && Math.abs(mixedCorner.y - 0.5) < 1e-6 && Math.abs(mixedCorner.z + 0.779422863) < 1e-6,
+  'mixed: the revolute panel corner is ' + mixedCorner.toArray().map(value => value.toFixed(4)).join(', ') + ', expected (0.45, 0.5, -0.7794)')
+assertVectorClose(mixedTrayOrigin(), new THREE.Vector3(1.8, 0.2, 0), 1e-6, 'mixed: the prismatic tray origin')
+assertMatrixClose(mixedPlatePose(), mixedPlateRest, 1e-9, 'mixed: the fixed-joint body moved on all-open')
+assertMatrixClose(bodyStageMatrix(mixedRoot, '/Mixed/Bodies/base'), mixedBaseRest, 1e-9, 'mixed: the root body moved on all-open')
+// 0.3 / 0.4 = 0.75 of the travel at 0.8 travel/s = 1250 ms; the hinge is faster.
+assert.ok(mixedOpenElapsed >= 1200 && mixedOpenElapsed <= 1400, 'mixed: all-open settled after ' + mixedOpenElapsed + ' ms')
+// Already at both limits: asking again is a no-op rather than a drift.
+mixedParts.setAll(true)
+assert.equal(mixedParts.tick(16), false, 'mixed: a stage already at its limits still reported motion')
+say('controller mixed open   revolute 60 deg (clamped from 120), prismatic +0.3 (clamped from 0.6), fixed body still')
+
+mixedParts.setAll(false)
+settle(mixedParts)
+assertRestPose(mixedRoot, mixedRest, 1e-9, 'mixed close')
+say('controller mixed close  both drivable parts back at the authored pose to 1e-9')
+
+// All open / All close alternation, twice, each endpoint asserted.
+for (let cycle = 0; cycle < 2; cycle += 1) {
+  mixedParts.setAll(true)
+  settle(mixedParts)
+  assertVectorClose(mixedLeafCorner(), new THREE.Vector3(0.45, 0.5, -0.779422863), 1e-6, 'mixed: all-open cycle ' + cycle)
+  mixedParts.setAll(false)
+  settle(mixedParts)
+  assertRestPose(mixedRoot, mixedRest, 1e-9, 'mixed: all-close cycle ' + cycle)
+}
+say('controller mixed all    All open/All close x2 alternation, each endpoint exact')
+
+// Home interrupts both joints mid-travel.
+mixedParts.setAll(true)
+mixedParts.tick(250)
+mixedParts.tick(250)
+const mixedMidCorner = mixedLeafCorner()
+const mixedMidTray = mixedTrayOrigin()
+assert.ok(mixedMidCorner.z < -1e-3 && mixedMidCorner.z > -0.779422863, 'mixed: the hinge was not mid-swing')
+assert.ok(mixedMidTray.x > 1.5 + 1e-3 && mixedMidTray.x < 1.8, 'mixed: the tray was not mid-slide')
+assert.equal(mixedParts.tick(0), true, 'mixed: tick at a mid-animation clock must still report motion')
+mixedParts.home()
+settle(mixedParts)
+assertRestPose(mixedRoot, mixedRest, 1e-6, 'mixed home mid-animation')
+assert.equal(mixedParts.tick(1000), false, 'mixed: tick after home reported motion')
+say('controller mixed home   mid-travel reset of both joints, rest pose to 1e-6')
+
+// Picking drives exactly one joint, and the other stays where it was.
+assert.equal(mixedParts.pick([]), false)
+assert.equal(mixedParts.pick(undefined), false)
+assert.equal(mixedParts.pick([{ object: mixedPlate }]), false, 'mixed: pick on the fixed-joint body moved something')
+assert.equal(mixedParts.pick([{ object: mixedRoot.getObjectByName('/Mixed/Bodies/base/mount') }]), false, 'mixed: pick on the root body moved something')
+assert.equal(mixedParts.pick([{ object: mixedRoot }]), false, 'mixed: pick on a group moved something')
+assert.equal(mixedParts.pick([{ object: mixedLeaf }]), true, 'mixed: pick on the leaf did not toggle the hinge')
+settle(mixedParts)
+assertVectorClose(mixedLeafCorner(), new THREE.Vector3(0.45, 0.5, -0.779422863), 1e-6, 'mixed: pick opened the leaf')
+assertVectorClose(mixedTrayOrigin(), new THREE.Vector3(1.5, 0.2, 0), 1e-6, 'mixed: opening the leaf moved the tray')
+const mixedLeafOpenPose = mixedLeafBodyPose().clone()
+assert.equal(mixedParts.pick([{ object: mixedTray }]), true, 'mixed: pick on the tray did not toggle the slide')
+settle(mixedParts)
+assertVectorClose(mixedTrayOrigin(), new THREE.Vector3(1.8, 0.2, 0), 1e-6, 'mixed: pick opened the tray')
+assertMatrixClose(mixedLeafBodyPose(), mixedLeafOpenPose, 1e-9, 'mixed: opening the tray moved the already-open leaf')
+assert.equal(mixedParts.pick([{ object: mixedLeaf }]), true, 'mixed: the second leaf pick did not close it')
+settle(mixedParts)
+assertVectorClose(mixedLeafCorner(), new THREE.Vector3(0.9, 0.5, 0), 1e-6, 'mixed: the leaf did not close')
+assertVectorClose(mixedTrayOrigin(), new THREE.Vector3(1.8, 0.2, 0), 1e-6, 'mixed: closing the leaf moved the open tray')
+mixedParts.home()
+settle(mixedParts)
+assertRestPose(mixedRoot, mixedRest, 1e-6, 'mixed pick sequence home')
+say('controller mixed pick   leaf and tray drive independently; fixed-joint body and root are no-ops')
+mixedParts.dispose()
+
+// ── colliders: on/on/off/on/off is idempotent and dispose releases ─────────
+
+const colliderRoot = makeMixedScene()
+const colliderRest = snapshotStage(colliderRoot)
+const mixedColliderParts = createArticulationController(colliderRoot, mixed)
+assert.ok(mixedColliderParts !== undefined, 'colliders: the controller refused to bind')
+assert.equal(mixedColliderParts.hasColliders, true)
+assertRestPose(colliderRoot, colliderRest, 1e-9, 'colliders bind')
+const colliderLeafGroup = bodyGroup(colliderRoot, '/Mixed/Bodies/leaf')
+const overlayGroups = () => colliderLeafGroup.children.filter(child => /\(collider\)$/.test(child.name))
+assert.equal(overlayGroups().length, 0, 'colliders: an overlay exists before it was asked for')
+mixedColliderParts.setCollidersVisible(true)
+assert.equal(overlayGroups().length, 1, 'colliders: show built ' + overlayGroups().length + ' overlays instead of one')
+const mixedOverlay = overlayGroups()[0]
+assert.equal(mixedOverlay.visible, true, 'colliders: the overlay was not made visible')
+const mixedOverlayShell = mixedOverlay.children.find(child => child.isMesh === true)
+assert.ok(mixedOverlayShell !== undefined, 'colliders: the overlay has no shell mesh')
+const mixedHullPoint = new THREE.Vector3().fromBufferAttribute(mixedOverlayShell.geometry.getAttribute('position'), 0)
+assert.ok(Math.abs(mixedHullPoint.x) < 1e-6 && Math.abs(mixedHullPoint.y - 0.5) < 1e-6 && Math.abs(mixedHullPoint.z + 0.04) < 1e-6,
+  'colliders: the overlay point is ' + mixedHullPoint.toArray().map(value => value.toFixed(3)).join(', ') + ', expected (0, 0.5, -0.04)')
+// Showing twice must not duplicate or rebuild the overlay.
+mixedColliderParts.setCollidersVisible(true)
+assert.equal(overlayGroups().length, 1, 'colliders: showing twice built a duplicate overlay')
+assert.equal(overlayGroups()[0], mixedOverlay, 'colliders: the second show rebuilt the overlay')
+mixedColliderParts.setCollidersVisible(false)
+assert.equal(mixedOverlay.visible, false, 'colliders: hiding left the overlay visible')
+mixedColliderParts.setCollidersVisible(true)
+assert.equal(overlayGroups()[0], mixedOverlay, 'colliders: re-showing rebuilt the overlay')
+assert.equal(mixedOverlay.visible, true, 'colliders: re-showing did not make the overlay visible')
+mixedColliderParts.setCollidersVisible(false)
+mixedColliderParts.dispose()
+assert.equal(colliderRoot.children.length, 4, 'colliders: dispose left body groups behind')
+assert.equal(colliderLeafGroup.parent, null, 'colliders: dispose left the body group parented')
+assert.equal(mixedOverlay.parent, null, 'colliders: dispose left the overlay parented')
+say('controller colliders   one body-attached overlay, on/on/off/on/off idempotent, dispose releases it')
+
+// ── the door: an open/close/open state machine on one revolute joint ───────
+
+const doorStateRoot = doorScene()
+const doorStateRest = snapshotStage(doorStateRoot)
+const doorParts = createArticulationController(doorStateRoot, door)
+assert.ok(doorParts !== undefined, 'door state: the controller refused to bind')
+const doorPanel = doorStateRoot.getObjectByName('/Door/Bodies/frame/leaf/panel')
+const doorCorner = () => stagePointOf(doorStateRoot, doorPanel, 0.9, -0.5, 0)
+assertVectorClose(doorCorner(), new THREE.Vector3(0.9, 0.5, 0), 1e-6, 'door state: rest corner')
+
+// open -> close -> open, every endpoint asserted.
+for (const [expected, label] of [
+  [new THREE.Vector3(0, 0.5, -0.9), 'open'],
+  [new THREE.Vector3(0.9, 0.5, 0), 'close'],
+  [new THREE.Vector3(0, 0.5, -0.9), 'open again'],
+]) {
+  assert.equal(doorParts.pick([{ object: doorPanel }]), true, 'door state: pick for ' + label + ' changed nothing')
+  settle(doorParts)
+  assertVectorClose(doorCorner(), expected, 1e-6, 'door state: ' + label)
+}
+say('controller door click   open -> close -> open, corner (0, 0.5, -0.9) <-> (0.9, 0.5, 0) exact')
+
+// All open / All close alternation.
+for (let cycle = 0; cycle < 2; cycle += 1) {
+  doorParts.setAll(true)
+  settle(doorParts)
+  assertVectorClose(doorCorner(), new THREE.Vector3(0, 0.5, -0.9), 1e-6, 'door state: all-open cycle ' + cycle)
+  doorParts.setAll(false)
+  settle(doorParts)
+  assertRestPose(doorStateRoot, doorStateRest, 1e-9, 'door state: all-close cycle ' + cycle)
+}
+say('controller door all     All open/All close x2 alternation, each endpoint exact')
+
+// Home interrupts the swing; the joint has to land exactly on the authored pose.
+assert.equal(doorParts.pick([{ object: doorPanel }]), true)
+doorParts.tick(300)
+const doorMidCorner = doorCorner()
+assert.ok(doorMidCorner.z < -1e-3 && doorMidCorner.z > -0.9, 'door state: the leaf was not mid-swing')
+doorParts.home()
+settle(doorParts)
+assertRestPose(doorStateRoot, doorStateRest, 1e-6, 'door state: home mid-swing')
+say('controller door home    mid-swing reset to the authored pose (1e-6)')
+
+// A click at the travel limit reverses toward home instead of overshooting.
+assert.equal(hinge.open, hinge.upper, 'door state: the fixture open pose should sit on the upper limit')
+doorParts.setAll(true)
+settle(doorParts)
+assert.ok(Math.abs(doorCorner().z + 0.9) < 1e-9, 'door state: the open endpoint is not exactly the authored limit')
+assert.equal(doorParts.pick([{ object: doorPanel }]), true, 'door state: a click at the limit started no motion')
+settle(doorParts)
+assertVectorClose(doorCorner(), new THREE.Vector3(0.9, 0.5, 0), 1e-6, 'door state: the click at the limit overshot')
+say('controller door limit   settled on 90 deg exactly, a click at the limit reverses (no overshoot)')
+
+// Timing boundary: the whole swing is the authored 110 deg/s (818 ms), and a
+// non-positive delta neither advances the clock nor changes the pose.
+assertRestPose(doorStateRoot, doorStateRest, 1e-6, 'door state: before timing')
+assert.equal(doorParts.pick([{ object: doorPanel }]), true)
+let swingMs = 0
+while (doorParts.tick(16) === true) {
+  swingMs += 16
+  assert.ok(swingMs <= 2000, 'door state: the swing never settled')
+}
+assert.ok(swingMs >= 800 && swingMs <= 850, 'door state: the 90 deg swing took ' + swingMs + ' ms of 16 ms ticks')
+// A non-positive delta must not move the animation clock.
+assert.equal(doorParts.pick([{ object: doorPanel }]), true)
+doorParts.tick(100)
+const beforeNegative = doorCorner()
+assert.equal(doorParts.tick(-100), true, 'door state: a negative delta stopped reporting motion')
+assertVectorClose(doorCorner(), beforeNegative, 1e-12, 'door state: a negative delta advanced the pose')
+doorParts.home()
+settle(doorParts)
+assertRestPose(doorStateRoot, doorStateRest, 1e-6, 'door state: after timing')
+say('controller door timing  a full 90 deg swing is ' + swingMs + ' ms of 16 ms ticks; delta <= 0 does not advance')
+
+// Rapid picks: five toggles with no tick between them all target the open pose
+// (the value has not moved yet), then a Home has to restore the rest pose.
+for (let click = 0; click < 5; click += 1) assert.equal(doorParts.pick([{ object: doorPanel }]), true)
+settle(doorParts)
+assertVectorClose(doorCorner(), new THREE.Vector3(0, 0.5, -0.9), 1e-6, 'door state: rapid picks did not settle open')
+doorParts.home()
+settle(doorParts)
+assertRestPose(doorStateRoot, doorStateRest, 1e-6, 'door state: home after rapid picks')
+say('controller door rapid   5 picks without ticks settle open, home restores the rest pose')
+
+// Closing is frame-rate independent too: 50 x 20 ms and one 1000 ms tick land
+// on the same body pose.
+const closeFastRoot = doorScene()
+const closeFastParts = createArticulationController(closeFastRoot, door)
+closeFastParts.setAll(true)
+settle(closeFastParts)
+closeFastParts.setAll(false)
+for (let step = 0; step < 50; step += 1) closeFastParts.tick(20)
+const closeSlowRoot = doorScene()
+const closeSlowParts = createArticulationController(closeSlowRoot, door)
+closeSlowParts.setAll(true)
+settle(closeSlowParts)
+closeSlowParts.setAll(false)
+closeSlowParts.tick(1000)
+assertMatrixClose(
+  stageMatrixOf(closeFastRoot, closeFastRoot.getObjectByName('/Door/Bodies/frame/leaf')),
+  stageMatrixOf(closeSlowRoot, closeSlowRoot.getObjectByName('/Door/Bodies/frame/leaf')),
+  1e-9,
+  'door close: twenty-millisecond ticks and one thousand-millisecond tick disagree',
+)
+closeFastParts.dispose()
+closeSlowParts.dispose()
+doorParts.dispose()
+say('controller door close   50 x 20 ms == 1 x 1000 ms (frame-rate independent in both directions)')
+
+// ── the drawer: prismatic travel, reverse and limits ──────────────────────
+
+const drawerStateRoot = makeDrawerScene()
+const drawerStateRest = snapshotStage(drawerStateRoot)
+const drawerParts = createArticulationController(drawerStateRoot, drawer)
+assert.ok(drawerParts !== undefined, 'drawer: the controller refused to bind')
+assert.equal(drawerParts.movingParts, 1, 'drawer: movingParts')
+const drawerTray = drawerStateRoot.getObjectByName('/Drawer/Bodies/tray/front')
+const drawerTrayOrigin = () => new THREE.Vector3().setFromMatrixPosition(bodyStageMatrix(drawerStateRoot, '/Drawer/Bodies/tray'))
+const drawerCarcassRest = bodyStageMatrix(drawerStateRoot, '/Drawer/Bodies/carcass').clone()
+assert.equal(slide.open, slide.upper, 'drawer: the fixture open pose should sit on the upper limit')
+
+assert.equal(drawerParts.pick([{ object: drawerTray }]), true, 'drawer: pick on the tray did not toggle the slide')
+settle(drawerParts)
+assertVectorClose(drawerTrayOrigin(), new THREE.Vector3(0.45, 0.2, 0), 1e-6, 'drawer: the open tray origin')
+assertMatrixClose(bodyStageMatrix(drawerStateRoot, '/Drawer/Bodies/carcass'), drawerCarcassRest, 1e-9, 'drawer: the fixed carcass moved')
+assert.equal(drawerParts.tick(16), false, 'drawer: tick after settling reported motion')
+assert.equal(drawerParts.pick([{ object: drawerTray }]), true, 'drawer: the second pick did not toggle back')
+settle(drawerParts)
+assertRestPose(drawerStateRoot, drawerStateRest, 1e-9, 'drawer reverse')
+say('controller drawer       prismatic +0.4 exactly to its limit, reverse click returns to rest, carcass still')
+
+// Home interrupts the slide.
+assert.equal(drawerParts.pick([{ object: drawerTray }]), true)
+drawerParts.tick(300)
+assert.ok(drawerTrayOrigin().x > 0.05 + 1e-3 && drawerTrayOrigin().x < 0.45, 'drawer: the tray was not mid-slide')
+drawerParts.home()
+settle(drawerParts)
+assertRestPose(drawerStateRoot, drawerStateRest, 1e-6, 'drawer home mid-slide')
+say('controller drawer home  mid-slide reset to the authored pose (1e-6)')
+
+// All open / All close alternation and frame-rate independence.
+for (let cycle = 0; cycle < 2; cycle += 1) {
+  drawerParts.setAll(true)
+  settle(drawerParts)
+  assertVectorClose(drawerTrayOrigin(), new THREE.Vector3(0.45, 0.2, 0), 1e-6, 'drawer: all-open cycle ' + cycle)
+  assert.equal(drawerParts.tick(16), false, 'drawer: already at the limit still reported motion')
+  drawerParts.setAll(false)
+  settle(drawerParts)
+  assertRestPose(drawerStateRoot, drawerStateRest, 1e-9, 'drawer: all-close cycle ' + cycle)
+}
+const drawerFastRoot = makeDrawerScene()
+const drawerFastParts = createArticulationController(drawerFastRoot, drawer)
+drawerFastParts.setAll(true)
+for (let step = 0; step < 50; step += 1) drawerFastParts.tick(20)
+const drawerSlowRoot = makeDrawerScene()
+const drawerSlowParts = createArticulationController(drawerSlowRoot, drawer)
+drawerSlowParts.setAll(true)
+drawerSlowParts.tick(1000)
+assertMatrixClose(
+  stageMatrixOf(drawerFastRoot, drawerFastRoot.getObjectByName('/Drawer/Bodies/tray')),
+  stageMatrixOf(drawerSlowRoot, drawerSlowRoot.getObjectByName('/Drawer/Bodies/tray')),
+  1e-9,
+  'drawer: twenty-millisecond ticks and one thousand-millisecond tick disagree',
+)
+drawerFastParts.dispose()
+drawerSlowParts.dispose()
+drawerParts.dispose()
+say('controller drawer all   All open/All close x2 alternation, 50 x 20 ms == 1 x 1000 ms')
+
+// ── the chain: per-joint independence and forward kinematics ──────────────
+
+const chainStateRoot = makeChainScene()
+const chainStateRest = snapshotStage(chainStateRoot)
+const chainStateParts = createArticulationController(chainStateRoot, chain)
+assert.ok(chainStateParts !== undefined, 'chain state: the controller refused to bind')
+assert.equal(chainStateParts.movingParts, 2, 'chain state: movingParts')
+const chainArmMesh = chainStateRoot.getObjectByName('/Chain/Bodies/arm/beam')
+const chainHandMesh = chainStateRoot.getObjectByName('/Chain/Bodies/hand/claw')
+const chainArmPose = () => bodyStageMatrix(chainStateRoot, '/Chain/Bodies/arm')
+const chainHandPose = () => bodyStageMatrix(chainStateRoot, '/Chain/Bodies/hand')
+const chainHandOrigin = () => new THREE.Vector3().setFromMatrixPosition(chainHandPose())
+const chainHandRest = chainHandOrigin().clone()
+// The hand joint's pivot sits on the hand body origin, so driving that joint
+// moves the hand's geometry, not its origin: pose checks use a claw corner.
+const chainHandCorner = () => stagePointOf(chainStateRoot, chainHandMesh, 0.2, 0.05, 0.1)
+const chainHandCornerRest = chainHandCorner().clone()
+const chainArmRest = chainArmPose().clone()
+const chainBaseRest = bodyStageMatrix(chainStateRoot, '/Chain/Bodies/base').clone()
+
+// The downstream joint drives only the hand: the arm stays exactly at rest.
+assert.equal(chainStateParts.pick([{ object: chainHandMesh }]), true, 'chain state: pick on the hand did not toggle its joint')
+settle(chainStateParts)
+assert.ok(chainHandCorner().distanceTo(chainHandCornerRest) > 0.1, 'chain state: the hand did not move when its own joint was driven')
+assertMatrixClose(chainArmPose(), chainArmRest, 1e-9, 'chain state: driving the hand moved the arm')
+chainStateParts.home()
+settle(chainStateParts)
+
+// The upstream joint drives the arm, and the hand follows through the tree.
+assert.equal(chainStateParts.pick([{ object: chainArmMesh }]), true, 'chain state: pick on the arm did not toggle its joint')
+settle(chainStateParts)
+const chainHandAfterArm = chainHandOrigin().clone()
+assert.ok(chainHandAfterArm.distanceTo(chainHandRest) > 0.3, 'chain state: the hand did not follow the arm')
+assertMatrixClose(bodyStageMatrix(chainStateRoot, '/Chain/Bodies/base'), chainBaseRest, 1e-9, 'chain state: upstream drive moved the base')
+// The joint frames are shared: from either body they describe the same point.
+for (const joint of chain.joints) {
+  const body0 = stageMatrixOf(chainStateRoot, bodyGroup(chainStateRoot, joint.body0))
+  const body1 = stageMatrixOf(chainStateRoot, bodyGroup(chainStateRoot, joint.body1))
+  const frame = new THREE.Matrix4().fromArray(joint.frame)
+  const pivotRest = new THREE.Vector3().setFromMatrixPosition(frame)
+  const restRelative = new THREE.Matrix4().fromArray(chain.bodies.find(body => body.path === joint.body0).matrix)
+  void restRelative
+  const fromBody0 = pivotRest.clone().applyMatrix4(new THREE.Matrix4().fromArray(chain.bodies.find(body => body.path === joint.body0).matrix).invert()).applyMatrix4(body0)
+  const fromBody1 = pivotRest.clone().applyMatrix4(new THREE.Matrix4().fromArray(chain.bodies.find(body => body.path === joint.body1).matrix).invert()).applyMatrix4(body1)
+  assert.ok(fromBody0.distanceTo(fromBody1) < 1e-9, joint.path + ': the joint frames came apart under the arm drive')
+}
+// Driving the hand while the arm is open moves the hand and leaves the arm alone.
+const chainArmOpenPose = chainArmPose().clone()
+const chainHandAfterArmOnly = chainHandOrigin().clone()
+const chainHandCornerAfterArm = chainHandCorner().clone()
+assert.equal(chainStateParts.pick([{ object: chainHandMesh }]), true, 'chain state: pick on the open hand did not toggle')
+settle(chainStateParts)
+assertMatrixClose(chainArmPose(), chainArmOpenPose, 1e-9, 'chain state: driving the hand moved the open arm')
+assert.ok(chainHandCorner().distanceTo(chainHandCornerAfterArm) > 0.1, 'chain state: the hand did not move under the combination')
+// Closing the hand restores only the hand's own travel, leaving the arm open.
+assert.equal(chainStateParts.pick([{ object: chainHandMesh }]), true)
+settle(chainStateParts)
+assertMatrixClose(chainArmPose(), chainArmOpenPose, 1e-9, 'chain state: closing the hand moved the arm')
+assert.ok(chainHandCorner().distanceTo(chainHandCornerAfterArm) < 1e-6, 'chain state: closing the hand did not return it to the arm-only pose')
+chainStateParts.home()
+settle(chainStateParts)
+assertRestPose(chainStateRoot, chainStateRest, 1e-6, 'chain state: home after independent drives')
+say('controller chain joints arm and hand drive independently, upstream motion reaches the hand (FK), frames coincident')
+
+// Both joints at once moves the hand further than either alone.
+chainStateParts.setAll(true)
+settle(chainStateParts)
+// The hand joint's pivot is the hand body origin, so a claw corner (not the
+// origin) is what distinguishes "arm only" from "both joints driven".
+const chainHandBothCorner = chainHandCorner().clone()
+assert.ok(
+  chainHandBothCorner.distanceTo(chainHandCornerRest) > chainHandCornerAfterArm.distanceTo(chainHandCornerRest),
+  'chain state: driving both joints moved the hand no further than the arm alone',
+)
+for (const joint of chain.joints) {
+  const body0 = stageMatrixOf(chainStateRoot, bodyGroup(chainStateRoot, joint.body0))
+  const body1 = stageMatrixOf(chainStateRoot, bodyGroup(chainStateRoot, joint.body1))
+  const frame = new THREE.Matrix4().fromArray(joint.frame)
+  const pivotRest = new THREE.Vector3().setFromMatrixPosition(frame)
+  const fromBody0 = pivotRest.clone().applyMatrix4(new THREE.Matrix4().fromArray(chain.bodies.find(body => body.path === joint.body0).matrix).invert()).applyMatrix4(body0)
+  const fromBody1 = pivotRest.clone().applyMatrix4(new THREE.Matrix4().fromArray(chain.bodies.find(body => body.path === joint.body1).matrix).invert()).applyMatrix4(body1)
+  assert.ok(fromBody0.distanceTo(fromBody1) < 1e-9, joint.path + ': the joint frames came apart when both joints were driven')
+}
+chainStateParts.setAll(false)
+settle(chainStateParts)
+assertRestPose(chainStateRoot, chainStateRest, 1e-9, 'chain state: all-close')
+chainStateParts.dispose()
+say('controller chain all    both joints driven at once, frames coincident, all-close rest to 1e-9')
+
+// ── envelope: every pose the mixed controls can command stays inside ───────
+
+const envelopeRoot = makeMixedScene()
+const envelopeParts = createArticulationController(envelopeRoot, mixed)
+assert.ok(envelopeParts !== undefined, 'envelope: the controller refused to bind')
+const mixedEnvelope = envelopeParts.extremeBounds()
+assert.ok(mixedEnvelope !== undefined, 'envelope: a drivable stage returned no envelope')
+assert.equal(Object.getPrototypeOf(mixedEnvelope), Object.prototype, 'envelope: the envelope must be a plain object')
+assert.equal(Array.isArray(mixedEnvelope.min) && mixedEnvelope.min.length === 3, true, 'envelope: min must be three plain numbers')
+assert.equal(Array.isArray(mixedEnvelope.max) && mixedEnvelope.max.length === 3, true, 'envelope: max must be three plain numbers')
+// The revolute swing must reach -Z and the prismatic travel +X.
+assert.ok(mixedEnvelope.min[2] <= -0.78, 'envelope: the revolute swing into -Z is missing (min z ' + mixedEnvelope.min[2] + ')')
+assert.ok(mixedEnvelope.max[0] >= 1.94, 'envelope: the prismatic travel is missing (max x ' + mixedEnvelope.max[0] + ')')
+assert.ok(mixedEnvelope.max[1] >= 1.7, 'envelope: the upper fixed body is missing (max y ' + mixedEnvelope.max[1] + ')')
+const mixedVertexNames = MIXED_MESHES.map(entry => entry.name)
+const insideMixed = label => assertInsideEnvelope(mixedEnvelope, stageVertices(envelopeRoot, mixedVertexNames), label)
+insideMixed('envelope: rest pose')
+assert.equal(envelopeParts.pick([{ object: envelopeRoot.getObjectByName('/Mixed/Bodies/leaf/panel') }]), true)
+settle(envelopeParts)
+insideMixed('envelope: leaf open')
+envelopeParts.home()
+settle(envelopeParts)
+assert.equal(envelopeParts.pick([{ object: envelopeRoot.getObjectByName('/Mixed/Bodies/tray/front') }]), true)
+settle(envelopeParts)
+insideMixed('envelope: tray open')
+envelopeParts.setAll(true)
+settle(envelopeParts)
+insideMixed('envelope: both open')
+envelopeParts.setAll(false)
+settle(envelopeParts)
+envelopeParts.setAll(true)
+envelopeParts.tick(250)
+envelopeParts.tick(250)
+insideMixed('envelope: mid-arc')
+envelopeParts.home()
+settle(envelopeParts)
+envelopeParts.dispose()
+say('controller envelope     rest + each single joint + both open + mid-arc inside extremeBounds (min z <= -0.78, max x >= 1.94)')
+
+// ── pick hit/miss matrix ──────────────────────────────────────────────────
+
+const pickRoot = doorScene()
+const pickParts = createArticulationController(pickRoot, door)
+assert.ok(pickParts !== undefined, 'pick matrix: the controller refused to bind')
+assert.equal(pickParts.pick([]), false, 'pick matrix: an empty hit list reported a toggle')
+assert.equal(pickParts.pick(undefined), false, 'pick matrix: an undefined hit list reported a toggle')
+assert.equal(pickParts.pick([null, undefined]), false, 'pick matrix: null hits reported a toggle')
+assert.equal(pickParts.pick([{ object: null }]), false, 'pick matrix: a null object reported a toggle')
+assert.equal(pickParts.pick([{ object: pickRoot }]), false, 'pick matrix: a group with no body reported a toggle')
+assert.equal(pickParts.pick([{ object: pickRoot.getObjectByName('/Door/Bodies/frame/post') }]), false, 'pick matrix: the fixed frame reported a toggle')
+assert.equal(pickParts.pick([{ object: pickRoot.getObjectByName('/Door/Static/instanced') }]), false, 'pick matrix: an unowned mesh reported a toggle')
+assert.equal(pickParts.pick([{ object: pickRoot.getObjectByName('/Door/Bodies/frame/leaf/instanced') }]), false, 'pick matrix: an InstancedMesh batch reported a toggle')
+assert.equal(pickParts.pick([{ object: pickRoot.getObjectByName('/Door/Bodies/frame/leaf/panel') }]), true, 'pick matrix: the drivable leaf reported nothing')
+settle(pickParts)
+pickParts.dispose()
+say('controller pick matrix  empty/null/group/fixed/unowned/instanced -> false, drivable leaf -> true')
 
 // ── a real articulated asset, when the environment points at one ───────────
 
