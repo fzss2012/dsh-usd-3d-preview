@@ -157,8 +157,9 @@ all 3 suites passed
 ```
 
 The suite was run twice in a row; both runs were green. The render suite resolves Playwright from
-`node_modules`, `PLAYWRIGHT_MODULE`, or a global npm install, and prints `SKIP` plus exit 0 when
-no browser is available (the offline suites still run).
+`node_modules`, `PLAYWRIGHT_MODULE`, or a global npm install. Without a browser it prints `SKIP`,
+and the runner now treats a skip as failure (`DSH_ALLOW_BROWSER_SKIP=1` permits offline-only
+runs); the committed CI workflow installs Playwright so the full suite runs there.
 
 ## 5. Known gaps
 
@@ -169,10 +170,10 @@ no browser is available (the offline suites still run).
    are signed by the host half only, and nothing is fetched when the variables are unset
    (those references appear as `layer-missing`). Crate-internal absolute `s3://` references
    additionally need the opt-in equal-length crate patcher.
-2. **The host half is a single read-only route.** It registers `/usd-preview/{health,asset}`
-   and has no other capability. Any future host feature must be routed and tested separately;
-   the asset route is covered by the render suite's fake-`webServer` test and the offline
-   `s3` suite.
+2. **The host half is a pair of read-only routes.** It registers `/api/usd-preview/{health,asset}`
+   as exact Fetch routes on the Connection service and has no other capability. Any future host
+   feature must be routed and tested separately; the routes are covered by the offline `s3`
+   suite (which mounts the Connection Fetch-route surface) and the render suite's host wiring.
 3. **Coverage that only the internal fixtures provided is narrowed.** The absolute-root
    read-back case (a session address whose path is absolute, so the engine's root key carries a
    directory) and an unreachable-reference case are no longer exercised by a committed fixture;
@@ -184,10 +185,12 @@ no browser is available (the offline suites still run).
 5. **No lockfile is committed** (see §3.3). `npm install` resolves the dependency ranges in
    `package.json`; two installs on different days can therefore resolve different transitive
    versions of the build tools.
-6. **The browser suites need an environment** — Playwright + Chromium (and optionally Pillow
-   for the colour probe). Without them the render/articulation-render/studio suites skip
-   loudly rather than failing, which is good for contributors but means CI must install them
-   explicitly to get real coverage; the register/parse/articulation/s3 suites run offline.
+6. **The browser suites need an environment** — Playwright + Chromium (the pixel probe decodes
+   with Chromium itself, so no Python/Pillow is needed). Without them the
+   render/articulation-render/studio suites print `SKIP`, and `npm test` now fails on a skip
+   instead of reporting a false green (`DSH_ALLOW_BROWSER_SKIP=1` allows offline-only runs);
+   the committed CI workflow installs Playwright so the full suite runs there, while
+   register/parse/articulation/s3 run offline.
 
 ## 6. Reproducing this checkout
 

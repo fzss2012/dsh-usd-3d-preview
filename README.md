@@ -185,11 +185,14 @@ Stages can keep their layers in object storage and reference them as `s3://bucke
 USD. A browser cannot sign an S3 request, and the WASM engine has no `s3` resolver, so the
 plugin splits the work:
 
-1. **Host route (signed read).** `GET /usd-preview/asset?uri=s3://…` on the host half signs a
-   SigV4 GET with credentials from the environment and streams the bytes back; a small
-   `GET /usd-preview/health` reports whether object storage is configured (endpoint/bucket
-   only — never keys). Both routes are read-only, same-origin, and guarded by a custom
-   request header that a cross-origin page cannot send without a preflight.
+1. **Host route (signed read).** `GET /api/usd-preview/asset?uri=s3://…` is an exact Fetch route
+   on the DSH Connection service, so the browser-trust fence (Host/Origin) and the session
+   credential admit the owner request before the host half signs a SigV4 GET with environment
+   credentials and returns the bytes. One read is bounded — 64 MiB and a 30 s timeout (`413`
+   when too large, generic `502` on an upstream failure). A small `GET /api/usd-preview/health`
+   reports whether object storage is configured (endpoint/bucket only — never keys or local
+   paths). Both routes are read-only and GET-only, and are not reachable outside the
+   authenticated `/api` channel.
 2. **Engine-side localization.** The engine only accepts its own package keys and rejects any
    non-http(s) layer URL, so an ASCII layer's `@s3://bucket/key@` references are rewritten to
    `@/__assets__/bucket/key@` before composition, and the object bytes are prefetched into the
@@ -207,8 +210,9 @@ are stored or logged:
 | `DSH_USD_S3_BUCKET` | bucket the `s3://` URIs name (default `asset`) |
 | `DSH_USD_S3_REGION` | SigV4 signing region (default `us-east-1`) |
 
-Object bytes are cached in `$DSH_HOME/cache/usd-assets/` (memory + disk), and the cache is
-best-effort: a read-only cache directory never breaks a preview. When object storage is not
+Object bytes are cached in `$DSH_HOME/cache/usd-assets/` (a bounded LRU in memory — 64
+entries / 128 MiB — plus a best-effort disk copy; a read-only cache directory never breaks a
+preview). When object storage is not
 configured, `s3://` references simply appear in the warnings list as `layer-missing`.
 
 Known limits of this path: only path-style S3-compatible endpoints are addressed; session
@@ -271,7 +275,7 @@ the patch layer.
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: five authored joint fixtures (door / drawer / three-link chain / fixed-only / no physics) go through `readArticulation`; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores) |
-| `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, memory/disk cache, 404 handling — no network and no real credentials |
+| `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and both `/api/usd-preview/*` routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc and the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle) |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, articulated fixture — each must draw a non-flat frame and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |

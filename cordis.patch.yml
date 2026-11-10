@@ -6,8 +6,9 @@
 #   ui-usd-3d-preview → package dsh-usd-3d-preview
 #
 # That entry does two things:
-#   (1) it loads the host half `lib/index.js`, which serves one read-only asset
-#       route (see below); it is also what lets client-modules discover
+#   (1) it loads the host half `lib/index.js`, which serves two read-only asset
+#       routes through the Connection service (see below); it is also what lets
+#       client-modules discover
 #       `dsh.client` in package.json and serve `lib/client.js` as a browser module;
 #   (2) the browser half registers a `documentPreviews` implementation and the
 #       keyed `sidebar.right.tab.document` body.
@@ -20,17 +21,20 @@
 #   · fallback = the crate parser and composer shipped with three >= 0.186, used
 #     automatically when the WASM engine is unavailable.
 #
-# The only host route is `GET /usd-preview/asset?uri=s3://…` (plus a read-only
-# `GET /usd-preview/health` status endpoint). A stage whose referenced layers live
-# in S3-compatible object storage cannot be signed by the browser, so the host
-# half signs those reads. Configuration is environment-only —
+# The only host routes are exact Fetch routes on the shared /api channel:
+# `GET /api/usd-preview/asset?uri=s3://…` and `GET /api/usd-preview/health`. They
+# are served only after the Connection browser-trust fence (Host/Origin) and the
+# session credential admit the owner request; one signed read is bounded (64 MiB,
+# 30 s, 413/502). A stage whose referenced layers live in S3-compatible object
+# storage cannot be signed by the browser, so the host half signs those reads.
+# Configuration is environment-only —
 # DSH_USD_S3_ENDPOINT / DSH_USD_S3_ACCESS_KEY / DSH_USD_S3_SECRET_KEY, with
 # optional DSH_USD_S3_BUCKET / DSH_USD_S3_REGION: no configuration file is read,
 # no credential is copied or stored, and nothing on the server is modified.
 #
 # No realm / isolate is needed: this package publishes no service to the root
 # realm and only consumes the existing documentPreviews / slots / locale / remote
-# / webServer services.
+# / connection services.
 - insert:
     - id: ui-usd-3d-preview
       name: dsh-usd-3d-preview
