@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { storageLibrary, keyOf, readAsset, defaultAssetCacheDir } from '../src/host/s3.js'
+import { MAX_ASSET_BYTES, storageLibrary, keyOf, readAsset, defaultAssetCacheDir } from '../src/host/s3.js'
 
 const lines = []
 function say(line) {
@@ -175,9 +175,17 @@ assert.equal(await readAsset(library, 's3://asset/scene/forbidden.usda', cacheDi
 stubFetch(() => new Response('', { status: 500 }))
 await assert.rejects(
   readAsset(library, 's3://asset/scene/broken.usda', cacheDir),
-  /asset read failed \(HTTP 500\): scene\/broken\.usda/,
-  'a server error rejects with the key it tried',
+  /asset read failed \(HTTP 500\)/,
+  'a server error rejects without buffering a body',
 )
+// One object above the byte cap refuses before its body is buffered.
+stubFetch(() => new Response('', { status: 200, headers: { 'content-length': String(MAX_ASSET_BYTES + 1) } }))
+await assert.rejects(
+  readAsset(library, 's3://asset/scene/huge.usda', cacheDir),
+  error => error?.name === 'AssetTooLargeError',
+  'an object above the byte cap is refused, not buffered',
+)
+
 // A URI outside the configured bucket resolves to undefined before any fetch.
 stubFetch(() => { throw new Error('an unreadable URI must not fetch') })
 assert.equal(await readAsset(library, 's3://other/scene/unit.usda', cacheDir), undefined)
@@ -187,78 +195,80 @@ say('readAsset              signed GET, disk/memory caches, 404/403 -> undefined
 
 await rm(cacheDir, { recursive: true, force: true })
 
-// ── the host route: health, header guard, URI validation, status mapping ─────
+// ── the host route: exact Fetch routes on the /api trust fence ──────────────
 
 /**
- * Build one host half against a fake webServer and return a tiny request client.
- * A fresh module instance per call, because the route resolves the library once.
+ * Build one host half against a fake Connection service and return a tiny
+ * request client. A fresh module instance per call, because the routes resolve
+ * the library once. The fake exposes only `connection.fetch.register`, so an
+ * implementation that still needs a raw web route cannot mount at all.
  */
 async function mountRoute({ tag, home }) {
   const savedHome = process.env.DSH_HOME
   if (home !== undefined) process.env.DSH_HOME = home
-  let route
+  const routes = new Map()
+  const context = {
+    effect: callback => callback(),
+    logger: { info() {}, warn() {}, debug() {} },
+  }
   try {
     const hostHalf = await import(new URL(`../lib/index.js?route-test-${tag}`, import.meta.url).href)
-    hostHalf.apply({
-      webServer: { register(value) { route = value; return () => undefined } },
-      effect: callback => callback(),
-      logger: { info() {}, warn() {}, debug() {} },
-    }, undefined)
+    context.inject = (_dependencies, callback) => callback(context)
+    context.connection = {
+      fetch: {
+        register(route) {
+          routes.set(route.path, route)
+          return async () => undefined
+        },
+      },
+    }
+    hostHalf.apply(context, undefined)
   } finally {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome
   }
-  assert.ok(route !== undefined, 'the host half registered no route')
-  assert.equal(route.path, '/usd-preview', 'the host route claims the /usd-preview prefix')
-  assert.equal(route.kind, 'prefix', 'the host route is registered as a prefix')
-  /** Send one fake request through the route and collect its answer. */
+  assert.equal(routes.size, 2, 'the host half registered two routes')
+  assert.ok(routes.has('/api/usd-preview/asset'), 'the asset route lives on the /api trust-fenced channel')
+  assert.ok(routes.has('/api/usd-preview/health'), 'the health route lives on the /api trust-fenced channel')
+  for (const route of routes.values()) {
+    assert.deepEqual(route.methods, ['GET'], 'the host routes are read-only')
+    assert.equal(route.requestBody, 'buffered', 'a GET route buffers no request body')
+    assert.equal(typeof route.fetch, 'function', 'the route is a Fetch handler')
+  }
+  /** Send one fake Fetch request through a registered route and collect its answer. */
   return async function request(pathname, { method = 'GET', headers = {} } = {}) {
-    const req = { method, url: pathname, headers }
-    const chunks = []
-    let status = 0
-    const responseHeaders = {}
-    const res = {
-      headersSent: false,
-      writeHead(code, values) { status = code; this.headersSent = true; Object.assign(responseHeaders, values ?? {}) },
-      end(body) { if (body !== undefined) chunks.push(Buffer.isBuffer(body) ? body : Buffer.from(String(body))) },
-      destroy() {},
+    const url = new URL(pathname, 'http://127.0.0.1')
+    const handler = routes.get(url.pathname)
+    assert.ok(handler !== undefined, `no route registered for ${url.pathname}`)
+    const response = await handler.fetch(new Request(url, { method, headers }))
+    return {
+      status: response.status,
+      headers: Object.fromEntries(response.headers),
+      body: Buffer.from(await response.arrayBuffer()).toString('utf8'),
     }
-    await route.handler(req, res)
-    return { status, headers: responseHeaders, body: Buffer.concat(chunks).toString('utf8') }
   }
 }
 
-// Unconfigured: health says so, the asset route refuses with 503, and the
-// caller-header guard and URI validation answer before any read is attempted.
+// Unconfigured: health says so, and URI validation answers before any read.
 await withEnvironment({}, async () => {
   const routeHome = await mkdtemp(join(tmpdir(), 'dsh-usd-route-'))
   const request = await mountRoute({ tag: 'unconfigured', home: routeHome })
   try {
-    const health = await request('/usd-preview/health')
+    const health = await request('/api/usd-preview/health')
     assert.equal(health.status, 200, 'health answers without a configured library')
     const body = JSON.parse(health.body)
     assert.equal(body.ok, true)
     assert.equal(body.library, null, 'health reports no library when the environment is empty')
-    assert.equal(body.cacheDir, join(routeHome, 'cache', 'usd-assets'), 'health reports the DSH_HOME cache directory')
+    assert.ok(!('cacheDir' in body), 'health never reports an absolute machine path')
 
-    const guarded = await request('/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a.usda'))
-    assert.equal(guarded.status, 403, 'the asset route requires the caller header')
-    const noUri = await request('/usd-preview/asset', { headers: { 'x-dsh-usd-preview': 'asset' } })
+    const noUri = await request('/api/usd-preview/asset')
     assert.equal(noUri.status, 400, 'the asset route requires a URI')
-    const notS3 = await request('/usd-preview/asset?uri=' + encodeURIComponent('https://example.com/a.usda'), {
-      headers: { 'x-dsh-usd-preview': 'asset' },
-    })
+    const notS3 = await request('/api/usd-preview/asset?uri=' + encodeURIComponent('https://example.com/a.usda'))
     assert.equal(notS3.status, 400, 'the asset route only accepts s3:// URIs')
-    const unconfigured = await request('/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a.usda'), {
-      headers: { 'x-dsh-usd-preview': 'asset' },
-    })
+    const unconfigured = await request('/api/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a.usda'))
     assert.equal(unconfigured.status, 503, 'an unconfigured library answers 503')
     assert.match(JSON.parse(unconfigured.body).error, /DSH_USD_S3_ENDPOINT/, 'the 503 names the variables to set')
-    const wrongMethod = await request('/usd-preview/asset', { method: 'POST', headers: { 'x-dsh-usd-preview': 'asset' } })
-    assert.equal(wrongMethod.status, 405, 'only GET is accepted')
-    const unknown = await request('/usd-preview/anything')
-    assert.equal(unknown.status, 404, 'an unknown path answers 404')
-    say('host route             health, 403 header guard, 400 URI, 503 unconfigured, 405, 404')
+    say('host route             /api Fetch routes, health, 400 URI, 503 unconfigured, no cacheDir leak')
   } finally {
     await rm(routeHome, { recursive: true, force: true })
   }
@@ -276,7 +286,7 @@ await withEnvironment({
   const request = await mountRoute({ tag: 'configured', home: routeHome })
   const savedFetch = globalThis.fetch
   try {
-    const health = await request('/usd-preview/health')
+    const health = await request('/api/usd-preview/health')
     const healthBody = JSON.parse(health.body)
     assert.deepEqual(healthBody.library, {
       endpoint: 'https://s3.example.com',
@@ -285,14 +295,25 @@ await withEnvironment({
     }, 'health reports the endpoint/bucket/source but never the credentials')
 
     globalThis.fetch = async () => new Response(new TextEncoder().encode('#usda 1.0\n'), { status: 200 })
-    const asset = await request('/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a/b.usda'), {
-      headers: { 'x-dsh-usd-preview': 'asset' },
-    })
+    const asset = await request('/api/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a/b.usda'))
     assert.equal(asset.status, 200, 'a configured library serves the asset')
+    assert.equal(asset.headers['content-type'], 'application/octet-stream')
     assert.equal(asset.body, '#usda 1.0\n', 'the route returns the object bytes')
     assert.equal(asset.headers['x-dsh-usd-preview-source'], 'remote', 'the response reports where the bytes came from')
     assert.deepEqual(new Uint8Array(await readFile(join(routeCache, 'asset', 'a', 'b.usda'))), new TextEncoder().encode('#usda 1.0\n'))
-    say('host route asset       signed read served end to end, cached under the DSH_HOME cache')
+
+    globalThis.fetch = async () => new Response('', {
+      status: 200,
+      headers: { 'content-length': String(MAX_ASSET_BYTES + 1) },
+    })
+    const huge = await request('/api/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a/huge.usda'))
+    assert.equal(huge.status, 413, 'an object above the byte cap answers 413 instead of buffering')
+
+    globalThis.fetch = async () => new Response('', { status: 500 })
+    const broken = await request('/api/usd-preview/asset?uri=' + encodeURIComponent('s3://asset/a/broken.usda'))
+    assert.equal(broken.status, 502, 'an upstream failure answers 502')
+    assert.equal(JSON.parse(broken.body).error, 'asset read failed', 'an upstream failure never leaks the internal error')
+    say('host route asset       signed read served end to end, 413 cap, 502 upstream, no error leak')
   } finally {
     globalThis.fetch = savedFetch
     await rm(routeHome, { recursive: true, force: true })

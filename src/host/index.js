@@ -6,46 +6,47 @@
  * request to an S3-compatible object-storage service, so this half resolves
  * `s3://…` references on its behalf:
  *
- *   GET /usd-preview/health        whether an asset library is configured
- *   GET /usd-preview/asset?uri=…   one referenced object's bytes
+ *   GET /api/usd-preview/health        whether an asset library is configured
+ *   GET /api/usd-preview/asset?uri=…   one referenced object's bytes
  *
- * Both paths are read-only and owned here. Configuration is environment-only
- * (see `s3.js`): nothing is copied or stored a second time, and no
- * infrastructure is modified.
+ * Both are exact Fetch routes on the Connection service, so the browser-trust
+ * fence (Host/Origin) and the session credential authenticate every request
+ * before it reaches this handler; only the owner Peer can read them. They are
+ * read-only and owned here. Configuration is environment-only (see `s3.js`):
+ * nothing is copied a second time, and no infrastructure is modified.
  */
-import { defaultAssetCacheDir, readAsset, storageLibrary } from './s3.js'
+import { AssetTooLargeError, READ_TIMEOUT_MS, defaultAssetCacheDir, readAsset, storageLibrary } from './s3.js'
 
-/** Absolute route prefix this plugin claims. */
-const ROUTE = '/usd-preview'
-
-/** Request header a caller must send; it also forces a preflight cross-origin, which this route never answers. */
-const CALLER_HEADER = 'x-dsh-usd-preview'
-
-/** The webserver is the only service this half cannot work without. */
-export const inject = ['webServer']
+/** Exact Fetch-route paths on the shared /api channel. */
+const ASSET_PATH = '/api/usd-preview/asset'
+const HEALTH_PATH = '/api/usd-preview/health'
 
 /** Plugin name shown by the loader. */
 export const name = 'usd-3d-preview'
 
 /**
  * Answer one request with JSON.
- * @param res - the response this route owns.
  * @param status - HTTP status code.
  * @param body - JSON-serializable body.
+ * @returns the response for the Fetch route.
  */
-function sendJson(res, status, body) {
-  const payload = Buffer.from(JSON.stringify(body, undefined, 2), 'utf8')
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': String(payload.byteLength),
-    'cache-control': 'no-store',
+function jsonResponse(status, body) {
+  return new Response(JSON.stringify(body, undefined, 2), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
   })
-  res.end(payload)
 }
 
 /**
- * Attach the asset route to the composition's webserver.
- * @param ctx - host context carrying the webserver service.
+ * Attach both read-only asset routes to the composition's Connection service.
+ *
+ * `ctx.inject` keeps the bundle entry loadable in a composition that has no
+ * Connection carrier (the browser half still works there); when one is present
+ * the routes are exact Fetch routes behind its trust/authentication policy.
+ * @param ctx - host context.
  */
 export function apply(ctx) {
   const cacheDir = defaultAssetCacheDir()
@@ -57,85 +58,98 @@ export function apply(ctx) {
     return libraryPromise
   }
 
-  const handler = async (req, res) => {
-    const url = new URL(req.url ?? ROUTE, 'http://localhost')
+  /**
+   * Answer the health route: whether a library is configured, never its secrets.
+   * @returns the JSON response.
+   */
+  const health = async () => {
+    const resolved = await library()
+    return jsonResponse(200, {
+      ok: true,
+      // Only the non-secret half is reported: the endpoint and where it came from.
+      library: resolved === undefined
+        ? null
+        : { endpoint: resolved.endpoint, bucket: resolved.bucket, source: resolved.source },
+    })
+  }
 
-    if (req.method === 'GET' && url.pathname === `${ROUTE}/health`) {
-      const resolved = await library()
-      sendJson(res, 200, {
-        ok: true,
-        // Only the non-secret half is reported: the endpoint and where it came from.
-        library: resolved === undefined
-          ? null
-          : { endpoint: resolved.endpoint, bucket: resolved.bucket, source: resolved.source },
-        cacheDir,
-      })
-      return
-    }
-
-    if (url.pathname !== `${ROUTE}/asset`) {
-      sendJson(res, 404, { error: `unknown route: ${url.pathname}` })
-      return
-    }
-    if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'only GET is allowed' })
-      return
-    }
-    // A cross-origin page cannot set this header without a preflight, and no
-    // preflight is answered here; a same-origin caller always can.
-    if (req.headers[CALLER_HEADER] === undefined) {
-      sendJson(res, 403, { error: `missing the ${CALLER_HEADER} request header` })
-      return
-    }
-
+  /**
+   * Answer one signed asset read.
+   * @param request - authenticated Fetch request on the shared /api channel.
+   * @returns the object bytes, or a JSON error response.
+   */
+  const asset = async (request) => {
+    const url = new URL(request.url)
     const uri = url.searchParams.get('uri')
     if (uri === null || !uri.startsWith('s3://')) {
-      sendJson(res, 400, { error: 'uri must be an s3:// reference' })
-      return
+      return jsonResponse(400, { error: 'uri must be an s3:// reference' })
     }
     const resolved = await library()
     if (resolved === undefined) {
-      sendJson(res, 503, {
+      return jsonResponse(503, {
         error: 'no asset library is configured: set DSH_USD_S3_ENDPOINT, '
           + 'DSH_USD_S3_ACCESS_KEY and DSH_USD_S3_SECRET_KEY '
           + '(optionally DSH_USD_S3_BUCKET and DSH_USD_S3_REGION)',
       })
-      return
     }
 
     try {
-      const asset = await readAsset(resolved, uri, cacheDir)
-      if (asset === undefined) {
-        sendJson(res, 404, { error: `asset not found or not readable: ${uri}` })
-        return
-      }
-      ctx.logger?.debug?.('[usd-3d-preview] asset %s (%s, %d B)', uri, asset.source, asset.data.byteLength)
-      res.writeHead(200, {
-        'content-type': 'application/octet-stream',
-        'content-length': String(asset.data.byteLength),
-        'cache-control': 'no-store',
-        'x-dsh-usd-preview-source': asset.source,
+      const result = await readAsset(resolved, uri, cacheDir, {
+        signal: request.signal,
+        timeoutMs: READ_TIMEOUT_MS,
       })
-      res.end(asset.data)
+      if (result === undefined) {
+        return jsonResponse(404, { error: 'asset not found or not readable' })
+      }
+      ctx.logger?.debug?.('[usd-3d-preview] asset %s (%s, %d B)', uri, result.source, result.data.byteLength)
+      return new Response(result.data, {
+        status: 200,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': String(result.data.byteLength),
+          'cache-control': 'no-store',
+          'x-dsh-usd-preview-source': result.source,
+        },
+      })
     } catch (error) {
+      if (error?.name === 'AssetTooLargeError') {
+        return jsonResponse(413, { error: 'asset is larger than the host read limit' })
+      }
+      // The caller went away; nobody is left to read a body.
+      if (request.signal.aborted) return new Response(null, { status: 499 })
       ctx.logger?.warn?.('[usd-3d-preview] asset %s failed: %s', uri, String(error?.message ?? error))
-      if (!res.headersSent) sendJson(res, 500, { error: String(error?.message ?? error) })
-      else res.destroy()
+      return jsonResponse(502, { error: 'asset read failed' })
     }
   }
 
-  ctx.effect(
-    () => ctx.webServer.register({ kind: 'prefix', path: ROUTE, handler }),
-    'usd-3d-preview: asset route',
-  )
-  void library().then(
-    (resolved) => {
-      ctx.logger?.info?.(
-        '[usd-3d-preview] asset route ready at %s (library=%s)',
-        ROUTE,
-        resolved === undefined ? 'none' : `${resolved.endpoint}/${resolved.bucket} from ${resolved.source}`,
-      )
-    },
-    () => undefined,
-  )
+  ctx.inject(['connection'], scope => {
+    scope.effect(
+      () => scope.connection.fetch.register({
+        path: ASSET_PATH,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: asset,
+      }),
+      'usd-3d-preview: signed asset route',
+    )
+    scope.effect(
+      () => scope.connection.fetch.register({
+        path: HEALTH_PATH,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: health,
+      }),
+      'usd-3d-preview: asset library health route',
+    )
+    void library().then(
+      (resolved) => {
+        ctx.logger?.info?.(
+          '[usd-3d-preview] asset routes ready at %s (library=%s)',
+          ASSET_PATH,
+          resolved === undefined ? 'none' : `${resolved.endpoint}/${resolved.bucket} from ${resolved.source}`,
+        )
+      },
+      () => undefined,
+    )
+  })
 }

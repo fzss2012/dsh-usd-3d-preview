@@ -62,12 +62,11 @@ export function apply(ctx) {
       // `s3://…` references are served by the host half, which signs the read
       // against the S3-compatible object storage configured through the
       // DSH_USD_S3_* environment variables. The browser cannot sign, and an
-      // unsigned read of that bucket is a 403.
+      // unsigned read of that bucket is a 403. The route is an exact Fetch route
+      // on the shared /api channel, so the same-origin session credential and
+      // the Host/Origin trust fence apply before the host signs anything.
       readAsset: async (uri, signal) => {
-        const response = await fetch(`/usd-preview/asset?uri=${encodeURIComponent(uri)}`, {
-          headers: { 'x-dsh-usd-preview': 'asset' },
-          signal,
-        })
+        const response = await fetch(`/api/usd-preview/asset?uri=${encodeURIComponent(uri)}`, { signal })
         if (!response.ok) return undefined
         return new Uint8Array(await response.arrayBuffer())
       },

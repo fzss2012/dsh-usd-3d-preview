@@ -100,17 +100,27 @@ function mountFromEnv(prefix, envName) {
 const realScene = mountFromEnv('real/', 'DSH_USD_TEST_SCENE')
 const simready = mountFromEnv('simready/', 'DSH_USD_TEST_SIMREADY')
 
-// ── the host half's asset route, wired to this test's server ────────────────
-let hostRoute
+// ── the host half's asset routes, wired to this test's server ───────────────
+const hostRoutes = new Map()
 const hostHalf = await import(new URL('../lib/index.js', import.meta.url).href).catch((error) => {
   throw new Error('lib/index.js missing — run `npm run build` first: ' + error.message)
 })
-hostHalf.apply({
-  webServer: { register(route) { hostRoute = route; return () => undefined } },
+/** Fake Connection service: only the exact Fetch-route surface the host half uses. */
+const hostContext = {
   effect: callback => callback(),
   logger: { info() {}, warn() {}, debug() {} },
-}, undefined)
-assert.ok(hostRoute !== undefined, 'the host half registered no route')
+  inject: (_dependencies, callback) => callback(hostContext),
+  connection: {
+    fetch: {
+      register(route) {
+        hostRoutes.set(route.path, route)
+        return async () => undefined
+      },
+    },
+  },
+}
+hostHalf.apply(hostContext, undefined)
+assert.equal(hostRoutes.size, 2, 'the host half registered both trust-fenced asset routes')
 
 /** Files to draw, and the geometry each must report. */
 const CASES = [
@@ -223,9 +233,23 @@ function fixturePath(name) {
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-  // The asset route is the real host handler: signing, config resolution, cache.
-  if (url.pathname.startsWith('/usd-preview')) {
-    void hostRoute.handler(req, res)
+  // The asset routes are the real host handlers: signing, config resolution, cache.
+  if (url.pathname.startsWith('/api/usd-preview')) {
+    const route = hostRoutes.get(url.pathname)
+    if (route === undefined) {
+      res.writeHead(404).end()
+      return
+    }
+    const request = new Request(new URL(req.url ?? '/', 'http://127.0.0.1'), {
+      method: req.method ?? 'GET',
+      headers: req.headers,
+    })
+    void route.fetch(request).then(async (response) => {
+      res.writeHead(response.status, Object.fromEntries(response.headers))
+      res.end(Buffer.from(await response.arrayBuffer()))
+    }, () => {
+      res.writeHead(500).end()
+    })
     return
   }
   if (url.pathname === '/') {

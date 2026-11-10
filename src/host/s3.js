@@ -15,6 +15,8 @@
  *
  * Everything here is a read: no upload, no policy change, no new account, and
  * the credentials are only ever held in memory for the lifetime of one signing.
+ * One read is bounded in time and size, and the memo cache is bounded too, so a
+ * stalled endpoint or an oversized object cannot take the host down with it.
  */
 import { createHash, createHmac } from 'node:crypto'
 import { readFile, mkdir, stat, writeFile } from 'node:fs/promises'
@@ -27,8 +29,64 @@ const S3_URI = /^s3:\/\/([^/]+)\/(.+)$/
 /** Empty-body payload hash every SigV4 GET with no body signs. */
 const EMPTY_SHA256 = createHash('sha256').update('').digest('hex')
 
-/** One entry of the in-memory asset cache. */
+/** Largest object one asset read accepts: anything bigger is refused, never buffered. */
+export const MAX_ASSET_BYTES = 64 * 1024 * 1024
+
+/** Wall-clock budget for one signed read (fetch plus body), so a stalled endpoint cannot park a request. */
+export const READ_TIMEOUT_MS = 30_000
+
+/** Entries the in-process memo keeps; the least recently used one is evicted first. */
+const MEMORY_MAX_ENTRIES = 64
+
+/** Bytes the in-process memo keeps; the least recently used entries are evicted first. */
+const MEMORY_MAX_BYTES = 128 * 1024 * 1024
+
+/** One entry of the in-memory asset cache, keyed by `bucket/key`. */
 const memory = new Map()
+
+/** Bytes currently held by `memory`, so eviction does not need to re-sum it. */
+let memoryBytes = 0
+
+/** Read one memo entry and mark it most recently used. */
+function memoryGet(memoryKey) {
+  const entry = memory.get(memoryKey)
+  if (entry === undefined) return undefined
+  memory.delete(memoryKey)
+  memory.set(memoryKey, entry)
+  return entry
+}
+
+/** Store one memo entry, evicting least-recently-used entries to stay bounded. */
+function memorySet(memoryKey, data) {
+  const previous = memory.get(memoryKey)
+  if (previous !== undefined) {
+    memory.delete(memoryKey)
+    memoryBytes -= previous.byteLength
+  }
+  if (data.byteLength > MEMORY_MAX_BYTES) return
+  memory.set(memoryKey, data)
+  memoryBytes += data.byteLength
+  while (memory.size > MEMORY_MAX_ENTRIES || memoryBytes > MEMORY_MAX_BYTES) {
+    const oldest = memory.keys().next()
+    if (oldest.done === true) break
+    const evicted = memory.get(oldest.value)
+    memory.delete(oldest.value)
+    if (evicted !== undefined) memoryBytes -= evicted.byteLength
+  }
+}
+
+/** One asset read refused because the object is larger than the host accepts. */
+export class AssetTooLargeError extends Error {
+  /**
+   * @param limit - the byte cap the object exceeded.
+   */
+  constructor(limit) {
+    super(`asset is larger than the ${String(limit)} byte read limit`)
+    this.name = 'AssetTooLargeError'
+    this.code = 'asset-too-large'
+    this.limit = limit
+  }
+}
 
 /**
  * The asset library this deployment reads from, or undefined when unconfigured.
@@ -132,39 +190,82 @@ export function keyOf(uri, library) {
 
 /**
  * Read one asset object, from the disk cache when this key was read before.
+ *
+ * The read is bounded: the body is accumulated only up to `maxBytes` (a bigger
+ * object refuses with {@link AssetTooLargeError}), the whole read aborts after
+ * `timeoutMs`, a caller abort aborts it too, and the memory cache is bounded.
  * @param library - the resolved library.
  * @param uri - one `s3://` URI.
  * @param cacheDir - where the disk cache lives.
+ * @param options - optional byte cap, timeout, and caller abort signal.
  * @returns the object bytes and where they came from, or undefined when the
  * object does not exist or the credentials may not read it.
  */
-export async function readAsset(library, uri, cacheDir) {
+export async function readAsset(library, uri, cacheDir, options = {}) {
+  const maxBytes = options.maxBytes ?? MAX_ASSET_BYTES
+  const timeoutMs = options.timeoutMs ?? READ_TIMEOUT_MS
   const key = keyOf(uri, library)
   if (key === undefined) return undefined
   const memoryKey = `${library.bucket}/${key}`
-  const memo = memory.get(memoryKey)
+  const memo = memoryGet(memoryKey)
   if (memo !== undefined) return { data: memo, source: 'memory' }
 
   const cached = join(cacheDir, library.bucket, ...key.split('/'))
   const hit = await stat(cached).catch(() => undefined)
-  if (hit !== undefined && hit.isFile() && hit.size > 0) {
+  if (hit !== undefined && hit.isFile() && hit.size > 0 && hit.size <= maxBytes) {
     const data = await readFile(cached)
-    memory.set(memoryKey, data)
+    memorySet(memoryKey, data)
     return { data, source: 'cache' }
   }
 
   const { url, headers } = signGet({ ...library, key })
-  const response = await fetch(url, { headers })
-  if (response.status === 404 || response.status === 403) return undefined
-  if (!response.ok) throw new Error(`asset read failed (HTTP ${response.status}): ${key}`)
-  const data = Buffer.from(await response.arrayBuffer())
-  memory.set(memoryKey, data)
-  // The cache is best effort: a read-only cache directory must not break a preview.
-  await mkdir(dirname(cached), { recursive: true }).then(
-    () => writeFile(cached, data),
-    () => undefined,
-  ).catch(() => undefined)
-  return { data, source: 'remote' }
+  const abort = new AbortController()
+  const caller = options.signal
+  /** @param {unknown} reason - why the read was aborted. */
+  const forwardAbort = reason => abort.abort(reason)
+  const onCallerAbort = () => forwardAbort(caller?.reason)
+  if (caller !== undefined) {
+    if (caller.aborted) onCallerAbort()
+    else caller.addEventListener('abort', onCallerAbort, { once: true })
+  }
+  const timer = setTimeout(() => forwardAbort(new Error('asset read timed out')), timeoutMs)
+  try {
+    const response = await fetch(url, { headers, signal: abort.signal })
+    if (response.status === 404 || response.status === 403) return undefined
+    if (!response.ok) throw new Error(`asset read failed (HTTP ${response.status})`)
+    const declared = Number(response.headers.get('content-length'))
+    if (Number.isFinite(declared) && declared > maxBytes) throw new AssetTooLargeError(maxBytes)
+    const chunks = []
+    let total = 0
+    if (response.body !== null) {
+      const reader = response.body.getReader()
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          total += value.byteLength
+          if (total > maxBytes) {
+            await reader.cancel().catch(() => undefined)
+            throw new AssetTooLargeError(maxBytes)
+          }
+          chunks.push(Buffer.from(value))
+        }
+      } finally {
+        reader.releaseLock()
+      }
+    }
+    const data = Buffer.concat(chunks, total)
+    memorySet(memoryKey, data)
+    // The cache is best effort: a read-only cache directory must not break a preview.
+    await mkdir(dirname(cached), { recursive: true }).then(
+      () => writeFile(cached, data),
+      () => undefined,
+    ).catch(() => undefined)
+    return { data, source: 'remote' }
+  } finally {
+    clearTimeout(timer)
+    caller?.removeEventListener('abort', onCallerAbort)
+  }
 }
 
 /**

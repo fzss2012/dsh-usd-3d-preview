@@ -44,13 +44,11 @@ createRoot(document.getElementById('host')).render(
       return new Uint8Array(await layer.arrayBuffer())
     }}
     // The asset reader is the host route's browser-side half; the test server
-    // wires the real host handler, so an `s3://` reference is signed and read
-    // from the same asset library the app would use.
+    // wires the real host handlers behind their /api trust-fenced Fetch routes,
+    // so an `s3://` reference is signed and read from the same asset library the
+    // app would use.
     readAsset={async (uri, signal) => {
-      const response = await fetch(`/usd-preview/asset?uri=${encodeURIComponent(uri)}`, {
-        headers: { 'x-dsh-usd-preview': 'asset' },
-        signal,
-      })
+      const response = await fetch(`/api/usd-preview/asset?uri=${encodeURIComponent(uri)}`, { signal })
       if (!response.ok) return undefined
       return new Uint8Array(await response.arrayBuffer())
     }}
