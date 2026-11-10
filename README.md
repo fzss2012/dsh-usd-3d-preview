@@ -2,7 +2,7 @@
 
 **OpenUSD in the browser.** A document preview for `.usd` / `.usda` / `.usdc` / `.usdz`
 that opens a USD stage in a side panel of the DeepSeek Harness (DSH) and draws it in
-WebGL with a studio-lit viewport — orbit camera, three-point lighting with shadows,
+WebGL with a studio-lit viewport — orbit camera, a studio lighting rig with shadows,
 reference grid, and the measured bounding-box size. Authored `UsdPhysics` joints and
 colliders make the stage **interactive**: click a part to open or close it, drive the
 whole mechanism from a toolbar. Optional read-only object-storage support resolves
@@ -272,12 +272,13 @@ the patch layer.
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: five authored joint fixtures (door / drawer / three-link chain / fixed-only / no physics) go through `readArticulation`; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores) |
 | `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, memory/disk cache, 404 handling — no network and no real credentials |
-| `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc and the on-demand frame rhythm (0 frames while idle) |
+| `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc and the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle) |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, articulated fixture — each must draw a non-flat frame and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |
 
-The browser suites need Playwright + Chromium; without a browser they print `SKIP` and exit 0,
-so the offline suites still run everywhere:
+The browser suites need Playwright + Chromium. Without a browser they print `SKIP`, and `npm test`
+fails instead of reporting a false green — set `DSH_ALLOW_BROWSER_SKIP=1` to run the offline suites
+only (the CI workflow installs Playwright, so skips never pass there):
 
 ```bash
 npm install --no-save playwright
@@ -289,7 +290,8 @@ Optional real-asset suites are gated by environment variables and skip when unse
 `DSH_USD_TEST_SIMREADY` (a local articulated `.usdc` asset) and `DSH_USD_TEST_SCENE` (a local
 stage whose layers resolve through the S3 object storage configured above;
 `DSH_USD_TEST_SCENE_ROOT` optionally overrides the addressed root). The browser tests decode
-and compare screenshots in-process (`tests/pixel-probe.mjs`), so no Python/Pillow is needed.
+and compare screenshots through a Chromium pixel probe (`tests/pixel-probe.mjs`), so no
+Python/Pillow is needed.
 
 Panel screenshots for a release or review can be captured from the same harness with
 `node tests/capture.mjs` — see [docs/screenshots/README.md](docs/screenshots/README.md).
@@ -347,8 +349,9 @@ object-storage reference example.
 This plugin reads **local workspace files** and, when explicitly configured through
 `DSH_USD_S3_*` environment variables, **read-only objects from an S3-compatible object
 storage**. It mounts a preview for four file extensions inside the DSH workspace: no
-uploads, no network access of its own, no credentials stored in the package, no
-configuration files, and no host route other than the read-only asset route above.
+uploads, no outbound network access beyond the configured object-storage reads, no
+credentials stored in the package, no configuration files, and no host route other than the
+authenticated read-only asset route above.
 
 ## License
 
