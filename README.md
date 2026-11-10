@@ -120,6 +120,12 @@ The engine fetches its own layers over http(s), which a workspace file is not. S
 3. each missing key is read through the workspace reader, added to the map, and the stage is
    recomposed — **up to 8 passes** (measured: a 2-hop reference chain converges in 2 passes).
 
+The reader is `remote.workspaceFiles.readBytes`, and the Client Remote answers with a result
+envelope (`{ ok: true, value }` / `{ ok: false, error }`) instead of rejecting. The injected
+`readLayer` therefore returns `value.data` for an ok result and `undefined` for a failed one: a
+layer the host cannot read is exactly the "missing layer" the engine already knows how to report,
+so it stays a warning in the panel rather than an exception that blanks the stage.
+
 Both the worker script and the `.wasm` binary travel inside `lib/client.js` as base64 and
 become blob URLs at first use. This is deliberate: a client plugin ships as one module-table
 entry and cannot assume a host route for two extra files. It costs ~3 MiB of bundle size, and
@@ -229,6 +235,13 @@ clone → `npm install` → `npm run build` produces them. The build patches the
 asset transport to route `s3:` URLs through the host route; if a future engine version moves
 that function the build fails loudly instead of silently dropping object-storage support.
 
+**Install from a built checkout, not from a git URL.** A package fetched straight from a git host
+(or a release tarball) is packed from the committed files, and the committed files hold no `lib/`.
+The host loader then cannot import `lib/index.js` and the browser is never offered `lib/client.js`,
+so the bundle appears installed while the preview never registers. There is no registry publication
+to fall back on, so the supported install is a local clone that has been built (`npm run build`)
+and is linked into the profile — that is what `link:` below does.
+
 ### As a dsh bundle
 
 The package is a bundle (`dsh.bundle.patch` → `cordis.patch.yml`) that inserts one loader entry,
@@ -240,6 +253,10 @@ the browser. Add it to a profile:
 "dependencies": { "dsh-usd-3d-preview": "link:C:/path/to/dsh-usd-3d-preview" },
 "dsh": { "profile": { "bundles": [ /* … */, "dsh-usd-3d-preview" ] } }
 ```
+
+The path is absolute (a Windows drive path and a POSIX path are both accepted). Install it through
+the Plugin settings page or `dsh plugin install link:/path/to/dsh-usd-3d-preview`, which records the
+same dependency and appends the bundle to `dsh.profile.bundles`.
 
 Profiles are live: the manifest and the patch file are watched, so no app restart is needed to
 pick the bundle up. The browser half hot-reloads; the host half goes through Node's ESM module

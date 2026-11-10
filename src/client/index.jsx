@@ -53,8 +53,11 @@ export function apply(ctx) {
     // those are, because it is the half that knows the opened file's address.
     inject: () => ({
       readLayer: async (sessionId, path, signal) => {
-        const file = await ctx.remote.workspaceFiles.readBytes(sessionId, path, {}, signal)
-        return file?.data
+        // The Client Remote answers with a result envelope, never by rejecting:
+        // the bytes live under `value`, and a failure is the honest "this layer
+        // does not exist", which the engine reports as a missing layer.
+        const result = await ctx.remote.workspaceFiles.readBytes(sessionId, path, {}, signal)
+        return result.ok ? result.value.data : undefined
       },
       // `s3://…` references are served by the host half, which signs the read
       // against the S3-compatible object storage configured through the

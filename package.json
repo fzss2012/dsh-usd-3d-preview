@@ -24,6 +24,8 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
+    "src",
+    "build.mjs",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -44,6 +46,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
+    "prepare": "node build.mjs",
     "test": "node tests/run.mjs"
   },
   "devDependencies": {
