@@ -153,8 +153,8 @@ The result is a body tree plus a joint table (type, axis, unit, `lower`/`upper`,
   independent `tick(deltaMs)`;
 - the toolbar offers **All open / All close / Home**, and a collider wireframe overlay that
   is hidden by default (the button only appears when collider geometry was actually read);
-- framing uses the union of the rest pose and the joint-travel extremes, so opening a joint
-  never pushes parts out of the viewport.
+- framing uses the union of the rest pose and the joint-travel extremes and is aspect-aware
+  (portrait sidebar panels included), so opening a joint keeps the model inside the viewport.
 
 Clicking works because the engine drops every vertex array after uploading it to the GPU
 (to save memory), while three's `Mesh.raycast` needs the position/normal/uv attributes. For
@@ -274,9 +274,9 @@ the patch layer.
 |---|---|
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
-| `articulation` | joint read-back and kinematics, **no browser needed**: five authored joint fixtures (door / drawer / three-link chain / fixed-only / no physics) go through `readArticulation`; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores) |
+| `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
 | `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and both `/api/usd-preview/*` routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
-| `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc and the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle) |
+| `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, and that a throwing frame observer stops the loop instead of hot-looping |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, articulated fixture — each must draw a non-flat frame and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |
 
@@ -323,6 +323,12 @@ object-storage reference example.
 - **Colliders are a geometric overlay, not collision.** Only `purpose = "guide"` or
   `PhysicsCollisionAPI` meshes are drawn as a shell + wireframe; there is no collision
   detection and no capsule/box approximation.
+- **Composed articulated assets assume an identity placement.** Bodies are read from the
+  layer-local prim paths; a referenced asset is matched when its body chain appears contiguously
+  inside the composed mesh path (`/World/Robot/root/Bodies/leaf` matches `/root/Bodies/leaf`,
+  lookalikes never match). The referencing prim's own transform is ignored, and two references
+  of the same articulated asset share one rest pose (the layer merge keeps the first definition),
+  so only the primary instance is driven correctly.
 - **Articulated stages keep one copy of the vertex arrays** (position / normal / uv) so that
   raycast picking works; static stages still release them.
 - **32 MiB per file read.** That is the host's `workspaceFiles.readBytes` `maxFileBytes`
