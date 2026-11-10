@@ -198,8 +198,14 @@ try {
 
 if (frames.length < 5) throw new Error(`screencast produced only ${frames.length} frames`)
 if (frames.length > maxFrames) {
-  // Keep the tail (the newest frames) only when the capture overran the budget.
-  frames.splice(0, frames.length - maxFrames)
+  // A software rasterizer can push more painted frames than a review GIF should
+  // carry. Sample evenly across the whole script (first and last included) rather
+  // than keeping a tail, so every captioned stage of the interaction survives.
+  const kept = []
+  const step = (frames.length - 1) / (maxFrames - 1)
+  for (let index = 0; index < maxFrames; index += 1) kept.push(frames[Math.round(index * step)])
+  frames.length = 0
+  frames.push(...kept)
 }
 const times = frames.map(frame => frame.timestamp)
 const start = times[0]

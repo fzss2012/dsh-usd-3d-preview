@@ -17,6 +17,10 @@
  *   * the on-demand loop: zero frames while idle, one per requestRender(), frames
  *     while auto-rotate runs, and frames only while an onFrame observer reports
  *     work — the cadence that keeps an articulated asset from burning the GPU;
+ *   * a throwing onFrame observer stops the loop instead of re-throwing on every
+ *     rAF, and a later request still draws;
+ *   * framing is aspect-aware: a portrait panel (a right-sidebar document tab)
+ *     keeps the model inside every edge, not just the top and bottom;
  *   * a pulled frame draws the new state, shadow included, rather than a stale one;
  *   * destroy() leaves no canvas behind and a second view still draws.
  *
@@ -176,10 +180,15 @@ await mkdir(artifacts, { recursive: true })
 const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader'] })
 probe = await createPixelProbe(browser)
 const pageErrors = []
+/** console.error() calls, for the contained-frame-loop check. */
+const consoleErrors = []
 const results = {}
 try {
   const page = await browser.newPage({ viewport: { width: STAGE.width + 40, height: STAGE.height + 40 } })
   page.on('pageerror', error => pageErrors.push(error?.stack ?? String(error)))
+  page.on('console', message => {
+    if (message.type() === 'error') consoleErrors.push(message.text())
+  })
   await page.goto(origin + '/')
   await page.waitForFunction(() => globalThis.__studio !== undefined)
   await page.evaluate(() => globalThis.__studio.mount())
@@ -322,6 +331,36 @@ try {
   assert.ok(
     afterPull.after - afterPull.before <= 1,
     'the loop kept drawing after the observer stopped pulling: ' + (afterPull.after - afterPull.before) + ' frames',
+  )
+
+  // ── a throwing observer stops the loop, and cannot wedge it ──────────────
+  // Three's animation loop has already scheduled the next frame when a frame
+  // callback runs, so an uncaught throw would repeat on every rAF: the view has
+  // to contain it, stop drawing, and let the next request start a clean loop.
+  const failedObserver = await page.evaluate(async () => {
+    const before = globalThis.__studio.frames()
+    globalThis.__studio.throwOnNextFrame()
+    // Long enough for the throttled software rasterizer to run the bad frame.
+    await new Promise(resolve => setTimeout(resolve, 600))
+    const afterThrow = globalThis.__studio.frames()
+    globalThis.__studio.stopThrowing()
+    globalThis.__studio.requestRender()
+    await globalThis.__studio.waitFrames(4)
+    return { before, afterThrow, afterRestart: globalThis.__studio.frames() }
+  })
+  results.failedObserver = failedObserver
+  assert.ok(
+    failedObserver.afterThrow - failedObserver.before <= 1,
+    'a throwing observer kept drawing frames: ' + (failedObserver.afterThrow - failedObserver.before),
+  )
+  assert.ok(
+    failedObserver.afterRestart > failedObserver.afterThrow,
+    'the view could not draw after the throwing observer was removed: '
+      + failedObserver.afterRestart + ' vs ' + failedObserver.afterThrow,
+  )
+  assert.ok(
+    consoleErrors.some(text => text.includes('frame stopped after an error')),
+    'the contained frame error was not reported: ' + JSON.stringify(consoleErrors),
   )
 
   const spinning = await page.evaluate(async () => {
@@ -604,6 +643,57 @@ try {
   )
   await page.evaluate(() => globalThis.__studio.unmount())
 
+  // ── a portrait panel frames the model without clipping it ────────────────
+  // A right-sidebar document tab is taller than it is wide, so the vertical FOV
+  // is generous and the horizontal one is what binds. A distance derived from
+  // the vertical angle alone clips the model at the sides here; this is the
+  // regression guard for that (margins must stay positive on all four edges).
+  const PORTRAIT = { width: 420, height: 900 }
+  await page.setViewportSize({ width: PORTRAIT.width + 40, height: PORTRAIT.height + 40 })
+  await page.evaluate(async (size) => {
+    globalThis.__studio.resize(size.width, size.height)
+    // Let the stage size land before the view measures its container.
+    await globalThis.__studio.waitFrames(2)
+    globalThis.__studio.mount()
+    await globalThis.__studio.waitFrames(6)
+    await globalThis.__studio.settle()
+    globalThis.__studio.setGridVisible(false)
+    globalThis.__studio.setShadowCasting(false)
+    globalThis.__studio.setFloorVisible(false)
+    await globalThis.__studio.waitFrames(4)
+  }, PORTRAIT)
+  const portraitShot = join(work, 'portrait.png')
+  await canvas.screenshot({ path: portraitShot })
+  const portraitBox = await probe.bbox(portraitShot, 6)
+  assert.equal(portraitBox.width, PORTRAIT.width, 'the portrait canvas is ' + portraitBox.width + ' px wide')
+  assert.equal(portraitBox.height, PORTRAIT.height, 'the portrait canvas is ' + portraitBox.height + ' px tall')
+  const portraitFill = {
+    x: (portraitBox.right - portraitBox.left + 1) / portraitBox.width,
+    y: (portraitBox.bottom - portraitBox.top + 1) / portraitBox.height,
+  }
+  const portraitMargin = {
+    left: portraitBox.left / portraitBox.width,
+    right: (portraitBox.width - portraitBox.right - 1) / portraitBox.width,
+    top: portraitBox.top / portraitBox.height,
+    bottom: (portraitBox.height - portraitBox.bottom - 1) / portraitBox.height,
+  }
+  const portraitOffsetX = Math.abs((portraitBox.left + portraitBox.right) / 2 - portraitBox.width / 2) / portraitBox.width
+  results.portrait = { fill: portraitFill, margin: portraitMargin, pixels: portraitBox.pixels }
+  assert.ok(portraitBox.pixels > 3000, 'the portrait model covers only ' + portraitBox.pixels + ' pixels')
+  for (const [side, share] of Object.entries(portraitMargin)) {
+    assert.ok(share > 0.02, 'the model is clipped at the portrait ' + side + ' edge: ' + (share * 100).toFixed(1) + '% margin')
+  }
+  assert.ok(portraitFill.x > 0.2, 'the portrait model fills only ' + (portraitFill.x * 100).toFixed(1) + '% of the width')
+  assert.ok(portraitOffsetX < 0.08, 'the portrait model is off-centre horizontally by ' + (portraitOffsetX * 100).toFixed(1) + '%')
+  await page.evaluate(() => globalThis.__studio.unmount())
+
+  // Back to the landscape stage and viewport the legacy comparison expects.
+  await page.setViewportSize({ width: STAGE.width + 40, height: STAGE.height + 40 })
+  await page.evaluate(async (size) => {
+    globalThis.__studio.resize(size.width, size.height)
+    await globalThis.__studio.waitFrames(2)
+  }, STAGE)
+
   // ── before/after: the same model under the previous placeholder rig ───────
   const beforeShot = join(artifacts, 'studio-before.png')
   await page.evaluate(async () => {
@@ -681,6 +771,13 @@ row('framing', 'model fills ' + percent(framing.fill.x) + ' x ' + percent(framin
   + '/' + percent(framing.margin.top) + '/' + percent(framing.margin.bottom))
 row('framed', 'a 1.6x reach box puts the model at ' + percent(results.framed.y) + ' of frame height (was '
   + percent(framing.fill.y) + '), stage still at the rest base')
+row('portrait', '420x900 panel: model fills ' + percent(results.portrait.fill.x) + ' x '
+  + percent(results.portrait.fill.y) + ' of the frame, margins l/r/t/b '
+  + percent(results.portrait.margin.left) + '/' + percent(results.portrait.margin.right)
+  + '/' + percent(results.portrait.margin.top) + '/' + percent(results.portrait.margin.bottom))
+row('observer', 'a throwing onFrame observer drew ' + (results.failedObserver.afterThrow - results.failedObserver.before)
+  + ' frame(s), then the loop restarted and drew '
+  + (results.failedObserver.afterRestart - results.failedObserver.afterThrow))
 row('teardown', 'canvas removed, second view drew ' + results.recreate.distinct + ' colours')
 
 process.stdout.write('\nstudio.test.mjs  OK  (screenshots in tests/.artifacts: studio-before.png, studio-after.png)\n')

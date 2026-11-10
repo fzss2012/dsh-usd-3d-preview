@@ -392,6 +392,20 @@ globalThis.__studio = {
     this.__stopAnimating = undefined
   },
 
+  /**
+   * Register an `onFrame` observer that throws, to prove a bad observer cannot
+   * wedge the on-demand loop into re-throwing on every rAF.
+   */
+  throwOnNextFrame() {
+    this.__throwStop = mounted.view.onFrame(() => { throw new Error('observer boom') })
+  },
+
+  /** Remove the throwing observer, if one is registered. */
+  stopThrowing() {
+    this.__throwStop?.()
+    this.__throwStop = undefined
+  },
+
   /** Return the camera to its framing pose, the way the toolbar's reset does. */
   reset() {
     mounted.view.reset()

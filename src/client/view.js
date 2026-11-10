@@ -89,6 +89,22 @@ const DEFAULT_FOV = 35
  * it into the middle of the panel.
  */
 const FRAME_MARGIN = 1.06
+/**
+ * The half-angle the framing sphere has to fit.
+ *
+ * `fov` is the *vertical* field of view, so a container narrower than it is
+ * tall clips the model horizontally first even though the vertical angle looks
+ * generous. The usable half-angle is the smaller of the two.
+ * @param fovDegrees - the vertical field of view, in degrees.
+ * @param aspect - container width / height.
+ * @returns the half-angle, in radians, the sphere must fit inside.
+ */
+function fitHalfAngle(fovDegrees, aspect) {
+  const vertical = (fovDegrees * Math.PI) / 360
+  const horizontal = Math.atan(Math.tan(vertical) * aspect)
+  return Math.min(vertical, horizontal)
+}
+
 /** Starting camera direction: front-right and slightly above, the usual hero angle. */
 const VIEW_DIRECTION = new THREE.Vector3(1, 0.62, 1).normalize()
 /** Orbit limits: the camera may not go under the floor the studio puts the model on. */
@@ -168,8 +184,10 @@ export function createView(container, object, options = {}) {
 
   // Distance at which the bounding sphere fits the frame, with the margin on top;
   // every other camera bound is derived from it so a small part and a large
-  // building orbit sensibly (near = distance/100, far = 100×).
-  const distance = (radius / Math.sin((perspective.fov * Math.PI) / 360)) * FRAME_MARGIN
+  // building orbit sensibly (near = distance/100, far = 100×). The half-angle is
+  // the smaller of the vertical and horizontal ones: a portrait panel (a
+  // right-sidebar document tab) would otherwise clip the model at the sides.
+  const distance = (radius / Math.sin(fitHalfAngle(perspective.fov, perspective.aspect))) * FRAME_MARGIN
   controls.maxDistance = distance * 4
 
   /** @type {Set<(deltaMs: number) => void>} */
@@ -216,7 +234,7 @@ export function createView(container, object, options = {}) {
     pendingFrame = false
     lastTime = 0
     // An observer may do work on this frame too; if it pulls, the loop takes over.
-    if (drawFrame(0) === true) requestRender()
+    if (drawFrameContained(0) === true) requestRender()
   }
 
   function startLoop() {
@@ -234,6 +252,38 @@ export function createView(container, object, options = {}) {
   }
 
   /**
+   * Report a frame that threw, and stop the loop instead of re-throwing it every
+   * rAF.
+   *
+   * Three's animation loop has already scheduled the next frame when the
+   * callback runs, so an uncaught throw inside an observer or `renderer.render`
+   * would repeat forever: it breaks the "idle costs nothing" contract and leaves
+   * `running` true, so `requestRender()` could never restart the loop. Stopping
+   * here lets the next explicit request (a toolbar action, a resize, a fresh
+   * observer) start a clean loop.
+   * @param error - what the frame threw.
+   */
+  function failLoop(error) {
+    stopLoop()
+    console.error('[dsh-usd-3d-preview] frame stopped after an error:', error)
+  }
+
+  /**
+   * Draw one frame, containing a throwing observer or renderer.
+   * @param deltaMs - time since the previous frame, in milliseconds.
+   * @returns {@link drawFrame}'s answer, or undefined when the frame threw (the
+   *   loop is already stopped and must not keep drawing).
+   */
+  function drawFrameContained(deltaMs) {
+    try {
+      return drawFrame(deltaMs)
+    } catch (error) {
+      failLoop(error)
+      return undefined
+    }
+  }
+
+  /**
    * The loop body. It stops itself as soon as nothing owns the next frame, so an
    * idle viewport leaves the GPU alone.
    * @param time - the rAF timestamp in milliseconds.
@@ -242,7 +292,10 @@ export function createView(container, object, options = {}) {
     const deltaMs = lastTime === 0 ? 0 : Math.max(0, time - lastTime)
     lastTime = time
     pendingFrame = false
-    const pulled = drawFrame(deltaMs)
+    const pulled = drawFrameContained(deltaMs)
+    // A thrown frame is contained and already stopped; drawing on would just
+    // throw again on the next rAF.
+    if (pulled === undefined) return
     // Keep drawing while: someone asked again, a gesture is live, an observer
     // pulled another frame, the camera is still settling after a drag, or
     // auto-rotate is on. The first condition that fails ends the loop — a static
