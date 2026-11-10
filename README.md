@@ -11,6 +11,11 @@ Web Worker — sublayers, references, payloads, variants, instancers — and thr
 result. If the engine cannot load, the viewer falls back to three's own crate/ASCII parser and
 says so in the panel.
 
+A stage reaches the preview one of two ways: a **workspace file opened by address** (click a
+`.usd` file in the Files tab) or an **external asset dropped onto the sidebar** (drag a file or a
+folder from the desktop onto the right Sidebar). Nothing is uploaded and nothing is written to the
+workspace in either case.
+
 It is one package in two halves: a **dsh bundle** and a **browser client plugin**.
 
 ```
@@ -68,16 +73,23 @@ an `InstancedMesh` is multiplied by its instance count and reported on its own "
 ## Architecture
 
 ```
-Files tab click
-   │
-   ├─ documentPreviews  ← definition registered by src/client/usd.js
-   │     id: dsh-usd-3d-preview/usd   extensions: usd usda usdc usdz   loading: bytes-complete
-   │
-   └─ sidebar.right.tab.document (keyed body: UsdBody)
-         │
+Files tab click                    drag a file/folder onto the sidebar
+   │                                        │
+   ├─ documentPreviews                      ├─ sidebarRightTabs 'usd-3d-preview' (page type)
+   │     id: dsh-usd-3d-preview/usd          │     guide card + capture-phase drop listener
+   │     extensions: usd usda usdc usdz     │
+   │     loading: bytes-complete            │
+   │                                        │
+   └─ sidebar.right.tab.document             └─ sidebar.right.pane.tab (keyed body: UsdDropBody)
+         (keyed body: UsdBody)                      │  drop zone / stage picker / header
+         │                                          │
+         └──────────────┬───────────────────────────┘
+                        │
          ├─ assemble()  ─── WASM engine in a Web Worker ─── OpenUSD composition
          │      │                ▲
-         │      │                └── files map (layer key → bytes) + 8 read-back passes
+         │      │                └── files map (layer key → bytes)
+         │      │                    workspace path: 8 read-back passes through the Remote
+         │      │                    dropped path:   one pass, all bytes already in the page
          │      └─ fallback: three USDCParser / USDAParser / USDComposer
          │
          └─ three.js WebGLRenderer (orbit controls, 3-point light, grid, bounds)
@@ -87,9 +99,11 @@ Files tab click
 
 Everything that crosses a boundary is injected rather than imported: the body receives
 `readLayer`, so the assembly is testable without a host and the workspace Remote remains the
-only component that knows how to locate a sibling file. `index.jsx` registers three reversible
-effects — the dictionaries, the preview definition, and the keyed body — through public client
-services only (`documentPreviews`, `slots`, `locale`, `remote.workspaceFiles`).
+only component that knows how to locate a sibling file. `index.jsx` registers six reversible
+effects — the dictionaries, the preview definition, the keyed document body, the sidebar page
+type (with its guide card), its tab body, and the sidebar drop watcher — through public client
+services only (`documentPreviews`, `sidebarRightTabs`, `sidebarRight`, `slots`, `locale`,
+`remote.workspaceFiles`).
 
 ### The read-back loop
 
@@ -113,6 +127,30 @@ become blob URLs at first use. This is deliberate: a client plugin ships as one 
 entry and cannot assume a host route for two extra files. It costs ~3 MiB of bundle size, and
 `lib/client.js` ends up around 4.7 MiB (three ≈ 1.4 MiB + engine ≈ 2.2 MiB of WASM).
 
+### External assets (drag and drop)
+
+`lib/client.js` also registers a page tab, `usd-3d-preview`, whose body
+([`src/client/DropBody.jsx`](src/client/DropBody.jsx)) opens a stage that is not in the workspace:
+
+1. the card appears in the sidebar guide (`USD 三维预览`, after Files and before Terminal) and
+   opens the drop zone with one click;
+2. a file drag anywhere over the right Sidebar panel is claimed in the capture phase
+   ([`src/client/sidebar-drop.js`](src/client/sidebar-drop.js)) — dashed outline, `松开以在 USD
+   预览中打开` hint — and on drop the page tab opens with the asset. Claiming it there is
+   deliberate: the conversation's attachment drop listens on the same document and accepts drops
+   across the whole page, so without the capture listener a stage dropped on the sidebar would
+   attach itself to the next prompt instead;
+3. a dropped **folder** brings the layers and textures the stage references (Chrome's entry API,
+   walked recursively), so a SimReady/unit layout composes exactly as it does on disk;
+4. one shallowest layer opens by itself; two stages at the same depth produce a picker instead of
+   a guess; a folder with no USD file says so instead of silently doing nothing;
+5. `.usdz` packages, `.usdc` crates and ASCII layers all take the same path, and the drop zone's
+   *Choose file* / *Choose folder* buttons feed the same collection code.
+
+Bytes stay in the page: no upload, no workspace write, no host route. The panel header names the
+opened layer and *Open another asset* goes back to the zone. The only thing the browser needs is
+the bundle — the same WASM engine composes the dropped stage.
+
 ## Build and install
 
 Requires **Node ≥ 20** and npm.
@@ -121,7 +159,7 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # register + parse + render suites
+npm test               # register + drop + parse + render suites
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
 
@@ -162,12 +200,19 @@ ESM module cache. To switch the plugin off, disable it in Settings → Plugins, 
   `OmniPBR`, and glTF MDL; a MaterialX-only asset hits the `material-fallback` warning. (The
   three fallback can texture MaterialX image nodes, but that path has no composition arcs.)
 - **Skeletal animation does not play.** Both paths show a static frame.
-- **32 MiB per file read.** That is the host's `workspaceFiles.readBytes` `maxFileBytes`
-  default, and referenced layers share it. It is a host setting, not something this plugin can
-  change; an over-limit file reports an explicit read failure rather than an empty stage.
-- **References must be workspace-relative paths.** `@https://…@`, drive-letter absolute paths,
-  and files outside the workspace cannot be read; the engine reports them as `layer-missing`
-  and they appear in the warnings list.
+- **32 MiB per file read** (workspace path). That is the host's `workspaceFiles.readBytes`
+  `maxFileBytes` default, and referenced layers share it. It is a host setting, not something this
+  plugin can change; an over-limit file reports an explicit read failure rather than an empty stage.
+  A dropped asset is read by the browser instead and is bounded by memory rather than that setting;
+  the engine still caps the load itself (`maxLayerBytes`, `maxTextureBytes`, `maxTriangles`).
+- **References must resolve inside what was opened.** For a workspace file: workspace-relative
+  paths (`@https://…@`, drive-letter absolute paths and files outside the workspace cannot be
+  read). For a dropped asset: the dropped file or folder — dropping only the root layer of a
+  referenced unit reports its siblings as `layer-missing`, exactly as the result of not carrying
+  them. Either way the engine reports the missing key and the panel lists it.
+- **A dropped stage is a page tab, not a document.** It has no resource address, so it cannot be
+  restored by the layout after a reload and does not appear in the Files tab history; dropping the
+  asset again reopens it.
 - **ASCII reference spelling in the fallback path.** The three fallback only understands
   `prepend references = @…@`; the engine follows the USD spec and accepts bare `references =`.
 - **Texture channel packing** (roughness/metalness) is left to the engine/three respectively.
@@ -184,6 +229,7 @@ ESM module cache. To switch the plugin off, disable it in Settings → Plugins, 
 | Suite | What it proves |
 |---|---|
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
+| `drop` | the external-asset path without a browser: name/key helpers, stage candidates and the auto-open rule, BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, picker collection, and the capture-phase sidebar listener against a faked document (USD drag claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including the injected reader) over nine fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, three-level instancer, custom-typed instancer — each must draw a non-flat frame, and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |
 
@@ -207,8 +253,9 @@ combination that three's composer cannot do at all.
 
 ## Scope
 
-This plugin reads **local workspace files only**. It mounts a preview for four file extensions
-inside the DSH workspace and nothing else: no network access of its own, no uploads, no
+This plugin reads **local bytes only** — workspace files through the host's Remote, and files the
+user drops on the sidebar through the browser's own file API. It mounts a preview for four file
+extensions and a drop entry for the same four, and nothing else: no network access of its own, no uploads, no
 credentials, no host route, and no configuration. Cloud asset-library support (object storage
 buckets referenced from a stage) was intentionally omitted from this open-source release; such
 references are reported as warnings rather than resolved.
@@ -222,6 +269,7 @@ MIT — see [LICENSE](LICENSE).
 在 DeepSeek Harness 的右侧文档面板里直接预览 `.usd` / `.usda` / `.usdc` / `.usdz`：
 组合（sublayer / reference / payload / variant / PointInstancer…）由 WebAssembly 版 OpenUSD
 在 Web Worker 里完成，three.js 负责渲染；引擎不可用时自动回退到 three 的解析器并在面板上写明。
-被引用图层经工作区 Remote 读回后重新组合，最多 8 轮。本开源版本只读取本地工作区文件，
-云端资产库支持已移除（相关引用会出现在提示列表里，而不是被解析）。构建：`npm install &&
-npm run build && npm test`。
+被引用图层经工作区 Remote 读回后重新组合，最多 8 轮。外部资产（桌面上的文件或文件夹）可以直接
+拖到右侧边栏打开：侧边栏「开始」页有「USD 三维预览」入口卡片，拖拽落在侧边栏面板上即会打开预览
+标签页，文件夹会连同被引用的图层和贴图一起读取；字节只在浏览器内处理，不上传、不写入工作区。
+构建：`npm install && npm run build && npm test`。

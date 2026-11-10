@@ -54,9 +54,13 @@ assert.equal(typeof registration.factory, 'function', 'the registration carries 
 
 const client = registration.factory(requireStub)
 assert.equal(typeof client.apply, 'function', 'the client half exports no apply()')
-assert.deepEqual([...requested].sort(), ['react', 'react/jsx-runtime'], 'unexpected external module requests')
+assert.deepEqual(
+  [...new Set(requested)].sort(),
+  ['react', 'react/jsx-runtime'],
+  'unexpected external module requests',
+)
 
-const seen = { effects: [], definitions: [], locales: [], injects: [], slots: [], reads: [] }
+const seen = { effects: [], definitions: [], locales: [], injects: [], slots: [], reads: [], types: [], opened: [] }
 const ctx = {
   locale: {
     bind: () => key => (key === 'title' ? 'USD 三维预览' : key),
@@ -95,6 +99,17 @@ const ctx = {
       return noop
     },
   },
+  sidebarRightTabs: {
+    register: (definition) => {
+      seen.types.push(definition)
+      return noop
+    },
+  },
+  sidebarRight: {
+    openTab: (kind) => {
+      seen.opened.push(kind)
+    },
+  },
   effect: (callback, label) => {
     seen.effects.push(label)
     callback()
@@ -104,7 +119,15 @@ const ctx = {
 
 client.apply(ctx)
 
-assert.deepEqual(client.inject, ['slots', 'locale', 'documentPreviews', 'remote', 'remote.workspaceFiles'])
+assert.deepEqual(client.inject, [
+  'slots',
+  'locale',
+  'documentPreviews',
+  'remote',
+  'remote.workspaceFiles',
+  'sidebarRightTabs',
+  'sidebarRight',
+])
 
 assert.equal(seen.definitions.length, 1, 'exactly one document preview definition is registered')
 const definition = seen.definitions[0]
@@ -124,8 +147,8 @@ assert.equal(definition.title(), 'USD 三维预览')
 // for a crate; the definition must say so itself.
 assert.equal(typeof definition.title, 'function')
 
-assert.deepEqual(seen.injects, ['sidebar.right.tab.document'])
-assert.equal(seen.slots.length, 1, 'the keyed document body is registered once')
+assert.deepEqual(seen.injects, ['sidebar.right.tab.document', 'sidebar.right.pane.tab'])
+assert.equal(seen.slots.length, 2, 'the document body and the sidebar page body are registered once each')
 const [body] = seen.slots
 assert.equal(body.options.name, 'sidebar.right.tab.document')
 assert.equal(body.options.key, definition.id, 'the body key must equal the definition id')
@@ -160,6 +183,28 @@ for (const value of Object.values(dictionary.dictionaries.en)) {
   assert.equal(typeof value, 'string')
 }
 
-assert.equal(seen.effects.length, 3, 'every registration is owned by a reversible effect')
+// The external-asset entry point: a page tab type with a guide card, a body for
+// that tab, and the drop watcher that opens it from a drag over the sidebar.
+assert.equal(seen.types.length, 1, 'exactly one sidebar tab type is registered')
+const [type] = seen.types
+assert.equal(type.id, 'dsh-usd-3d-preview/panel')
+assert.equal(type.kind, 'usd-3d-preview')
+assert.equal(type.priority, 'extension', 'an outside type must not lose the kind to a product type')
+assert.equal(type.patterns, undefined, 'a page type recognizes no resource address')
+assert.equal(type.title(), 'USD 三维预览')
+assert.equal(type.guide.length, 1, 'the guide contributes one entry box')
+assert.equal(type.guide[0].id, 'open')
+assert.equal(typeof type.guide[0].title, 'function')
+assert.equal(typeof type.guide[0].description, 'function')
+assert.equal(typeof type.guide[0].icon, 'function', 'the guide entry carries its own artwork')
+assert.equal(typeof type.guide[0].order, 'number')
+
+const pageBody = seen.slots.find(slot => slot.options.name === 'sidebar.right.pane.tab')
+assert.ok(pageBody !== undefined, 'the sidebar page body is not registered')
+assert.equal(pageBody.options.key, type.id, 'the tab body key must equal the type id')
+assert.equal(pageBody.options.locale, 'usd3dPreview')
+assert.equal(typeof pageBody.component, 'function')
+
+assert.equal(seen.effects.length, 6, 'every registration is owned by a reversible effect')
 
 process.stdout.write(`register.test.mjs  OK  (${seen.effects.length} effects, ${requested.length} module requests)\n`)

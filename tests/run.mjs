@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const SUITES = ['register', 'parse', 'render']
+const SUITES = ['register', 'drop', 'parse', 'render']
 
 /** Run one suite, inheriting stdio so its own reporting stays visible. */
 function suite(name) {
