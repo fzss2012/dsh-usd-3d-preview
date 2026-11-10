@@ -174,6 +174,18 @@ const TOKEN_LIST_OP = 32
 /** Crate quaternions are stored (i, j, k, real); USD text writes (real, i, j, k). */
 const QUATERNION_TYPES = new Set(['quatf', 'quatd', 'quath'])
 
+/**
+ * Crate value-type enums whose inlined form is a packed int8 tuple.
+ *
+ * OpenUSD inlines a vector when every component is exactly representable as
+ * int8 (`crateValueInliners.h`), packing the components into the low 32 bits of
+ * the value rep. three's `USDCParser` decodes that only for floating vectors;
+ * a `double3 xformOp:translate` is common enough, and its inline form common
+ * enough, that a raw payload read as a scalar would silently move a body to
+ * (256, 0, 0). These are decoded from the raw rep below.
+ */
+const INLINE_VECTOR_DIMENSIONS = new Map([[19, 2], [21, 2], [23, 3], [25, 3], [27, 4], [29, 4]])
+
 /** Crate bootstrapping: 8 magic bytes, 3 version bytes, 5 reserved, 8 TOC offset. */
 const CRATE_VERSION_AT = 8
 const CRATE_TOC_AT = 16
@@ -1042,6 +1054,59 @@ function mergePrim(into, from, specifier) {
 // ── crate layers ───────────────────────────────────────────────────────────
 
 /**
+ * Decode the inlined vector defaults that three's parser returns as a scalar.
+ *
+ * OpenUSD writes a vector inline when every component is exactly representable
+ * as int8; three then hands back the raw 32-bit payload instead of an array.
+ * Only specs of attributes this module consumes are read (`default` field,
+ * inlined vector value type); everything else keeps three's decoding.
+ * @param parser - the parser instance that already decoded the section tables.
+ * @returns a map of property path to the decoded component array.
+ */
+function crateInlinedAttributeValues(parser) {
+  const out = new Map()
+  try {
+    const paths = parser.paths
+    const specs = parser.specs
+    const fields = parser.fields
+    const fieldSets = parser.fieldSets
+    const tokens = parser.tokens
+    if (!Array.isArray(specs) || !Array.isArray(fields) || !Array.isArray(fieldSets)) return out
+    if (!Array.isArray(paths) || !Array.isArray(tokens)) return out
+    for (const spec of specs) {
+      if (spec.specType !== SPEC_ATTRIBUTE) continue
+      const path = paths[spec.pathIndex]
+      if (typeof path !== 'string' || path === '') continue
+      const name = path.slice(path.lastIndexOf('.') + 1)
+      if (name.startsWith('xformOp') === false && name.startsWith('physics:') === false && name.startsWith('simready:') === false) continue
+      let at = spec.fieldSetIndex
+      for (let guard = 0; guard < 4096; guard += 1) {
+        const fieldIndex = fieldSets[at]
+        if (fieldIndex === undefined || fieldIndex === FIELD_SET_END || fieldIndex === 0xFFFFFFFF) break
+        at += 1
+        const field = fields[fieldIndex]
+        if (field === undefined) break
+        if (tokens[field.tokenIndex] !== 'default') continue
+        const rep = field.valueRep
+        if (rep === undefined || rep.isInlined !== true) break
+        const dimension = INLINE_VECTOR_DIMENSIONS.get(rep.typeEnum)
+        if (dimension === undefined) break
+        const components = new Array(dimension)
+        for (let index = 0; index < dimension; index += 1) {
+          const byte = (rep.lo >>> (8 * index)) & 0xFF
+          components[index] = byte > 0x7F ? byte - 0x100 : byte
+        }
+        out.set(path, components)
+        break
+      }
+    }
+  } catch {
+    // A container this build decodes differently keeps three's values.
+  }
+  return out
+}
+
+/**
  * Decode the `apiSchemas` list of every prim spec in a crate layer.
  *
  * three's parser skips list ops on purpose (`TokenListOp` is "not needed for
@@ -1138,6 +1203,7 @@ function readCrateLayer(bytes) {
   }
   const specs = parser.specsByPath ?? {}
   const apiSchemas = crateApiSchemas(parser)
+  const inlinedValues = crateInlinedAttributeValues(parser)
   const prims = new Map()
   const propertyPaths = []
   for (const path of Object.keys(specs)) {
@@ -1169,15 +1235,22 @@ function readCrateLayer(bytes) {
     if (spec.specType === SPEC_RELATIONSHIP) {
       const targets = Array.isArray(fields.targetPaths) ? fields.targetPaths : []
       owner.rels[name] = targets.filter(target => typeof target === 'string' && target.startsWith('/'))
-    } else if (fields.default !== undefined && fields.default !== null) {
-      // Keep one quaternion convention downstream: the crate stores the
-      // imaginary part first, the text format the real part.
-      owner.attrs[name] = QUATERNION_TYPES.has(fields.typeName) === true
-        ? crateQuaternion(fields.default)
-        : fields.default
+    } else if (spec.specType === SPEC_ATTRIBUTE) {
+      // An inlined vector was handed back as its raw payload by three; use the
+      // decoded components instead of letting a scalar be read as a transform.
+      const repaired = inlinedValues.get(path)
+      if (repaired !== undefined) {
+        owner.attrs[name] = repaired
+      } else if (fields.default !== undefined && fields.default !== null) {
+        // Keep one quaternion convention downstream: the crate stores the
+        // imaginary part first, the text format the real part.
+        owner.attrs[name] = QUATERNION_TYPES.has(fields.typeName) === true
+          ? crateQuaternion(fields.default)
+          : fields.default
+      }
     }
   }
-  return prims
+  return { prims, warnings: [] }
 }
 
 // ── reading a stage ────────────────────────────────────────────────────────
@@ -1212,13 +1285,16 @@ async function layerBytesOf(sources) {
  * @returns the prim map and the text it came from (undefined for a crate).
  */
 function decodeLayer(bytes) {
-  if (isCrateLayer(bytes)) return { prims: readCrateLayer(bytes), text: undefined }
+  if (isCrateLayer(bytes)) {
+    const decoded = readCrateLayer(bytes)
+    return { prims: decoded.prims, text: undefined, warnings: decoded.warnings }
+  }
   if (!isTextLayer(bytes)) return undefined
   const text = decodeText(bytes)
   // Cheapest rejection there is: a text layer without the word cannot declare
   // a joint. Crates cannot be rejected this way (their token table is LZ2/LZ4).
   if (text.includes('Physics') === false && text.includes('physics:') === false) return undefined
-  return { prims: new AsciiLayerReader(text).read(), text }
+  return { prims: new AsciiLayerReader(text).read(), text, warnings: [] }
 }
 
 /** Read the collision arrays a prim carries, from the crate values or its text span. */
@@ -1262,22 +1338,32 @@ function matchBody(path, bodyPaths) {
  *   iterable of `[key, bytes]`.
  * @returns the articulation, or `undefined` when the stage declares none.
  */
-export async function readArticulation(sources) {
+export async function readArticulation(sources, onWarning) {
   try {
-    return await readArticulationOf(sources)
-  } catch {
+    return await readArticulationOf(sources, onWarning)
+  } catch (error) {
     // A total function: a stage this reader cannot make sense of is "no
-    // articulation", not an error the viewport has to explain.
+    // articulation", not an error the viewport has to explain. The caller that
+    // wants to know why passes `onWarning` and gets the reason instead of a
+    // silent static stage.
+    if (typeof onWarning === 'function') {
+      onWarning(`the articulated structure could not be read: ${error instanceof Error ? error.message : String(error)}`)
+    }
     return undefined
   }
 }
 
 /** The body of {@link readArticulation}; may throw, the export cannot. */
-async function readArticulationOf(sources) {
+async function readArticulationOf(sources, onWarning) {
   const entries = await layerBytesOf(sources)
   if (entries.length === 0) return undefined
 
   const warnings = []
+  /** Record one approximation/limitation, and hand it to a caller that listens. */
+  const warn = (message) => {
+    warnings[warnings.length] = message
+    if (typeof onWarning === 'function') onWarning(message)
+  }
   /** path -> { prim, text }: first definition wins, like a stronger layer. */
   const merged = new Map()
   for (const entry of entries) {
@@ -1285,10 +1371,11 @@ async function readArticulationOf(sources) {
     try {
       layer = decodeLayer(entry.bytes)
     } catch (error) {
-      warnings.push(`layer ${entry.key} could not be decoded: ${error instanceof Error ? error.message : String(error)}`)
+      warn(`layer ${entry.key} could not be decoded: ${error instanceof Error ? error.message : String(error)}`)
       continue
     }
     if (layer === undefined) continue
+    for (const warning of layer.warnings ?? []) warn(warning)
     for (const [path, prim] of layer.prims) {
       const existing = merged.get(path)
       if (existing === undefined) merged.set(path, { prim, text: layer.text })
@@ -1341,7 +1428,7 @@ async function readArticulationOf(sources) {
     }
     if (prim.type.startsWith('Physics') && prim.type.endsWith('Joint')) {
       // Spherical and distance joints have no single authored axis to drive.
-      warnings.push(`${prim.path} is a ${prim.type}, which this preview cannot drive; treated as fixed`)
+      warn(`${prim.path} is a ${prim.type}, which this preview cannot drive; treated as fixed`)
       jointPrims.push({ prim, kind: 'fixed' })
     }
   }
@@ -1366,7 +1453,7 @@ async function readArticulationOf(sources) {
   for (const path of bodyPaths) {
     const entry = merged.get(path)
     if (entry === undefined) {
-      warnings.push(`joint targets ${path}, which no composed layer defines; placed at the stage origin`)
+      warn(`joint targets ${path}, which no composed layer defines; placed at the stage origin`)
     }
     const world = worldOfPath(path)
     bodies.push({ path, name: path.slice(path.lastIndexOf('/') + 1), matrix: matrixArray(world) })
@@ -1382,7 +1469,7 @@ async function readArticulationOf(sources) {
     const body0 = (prim.rels['physics:body0'] ?? [])[0] ?? null
     const body1 = (prim.rels['physics:body1'] ?? [])[0] ?? null
     if (body1 === null && body0 === null) {
-      warnings.push(`${prim.path} names no rigid body; skipped`)
+      warn(`${prim.path} names no rigid body; skipped`)
       continue
     }
     const world0 = body0 === null ? identity : worldOfPath(body0)
@@ -1406,7 +1493,14 @@ async function readArticulationOf(sources) {
     }
     const frameWorld = new THREE.Matrix4().multiplyMatrices(world0, local)
     const pivot = new THREE.Vector3().setFromMatrixPosition(frameWorld)
-    const axis = axisOf(prim.attrs['physics:axis'])
+    const authoredAxis = prim.attrs['physics:axis']
+    const axis = axisOf(authoredAxis)
+    if (kind !== 'fixed') {
+      const token = typeof authoredAxis === 'string' ? authoredAxis.trim().toUpperCase() : undefined
+      if (authoredAxis === undefined || (token !== undefined && token !== 'X' && token !== 'Y' && token !== 'Z')) {
+        warn(`${prim.path} authors no usable physics:axis; its travel is driven about +X`)
+      }
+    }
 
     const home = numberOr(prim.attrs['simready:rest'], numberOr(prim.attrs['simready:home'], 0))
     let lower = numberOr(prim.attrs['physics:lowerLimit'], Number.NaN)
@@ -1460,7 +1554,7 @@ async function readArticulationOf(sources) {
   }
   if (joints.length === 0) return undefined
   if (assumedLimits > 0) {
-    warnings.push(`${assumedLimits} joint(s) authored no travel limits; a symmetric default range was assumed`)
+    warn(`${assumedLimits} joint(s) authored no travel limits; a symmetric default range was assumed`)
   }
 
   // ── tree order and roots ────────────────────────────────────────────────

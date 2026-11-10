@@ -29,6 +29,7 @@ export const zh = {
   homeParts: '复位部件',
   colliders: '碰撞体',
   articulationFailed: '可动部件无法解析',
+  partWarnings: '可动部件提示',
   ground: '地面',
   shadows: '阴影',
 }
@@ -62,6 +63,7 @@ export const en = {
   homeParts: 'Home parts',
   colliders: 'Colliders',
   articulationFailed: 'The moving parts could not be read',
+  partWarnings: 'Moving parts',
   ground: 'Ground',
   shadows: 'Shadows',
 }

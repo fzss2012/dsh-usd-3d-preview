@@ -262,10 +262,17 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
       let articulation
       let articulationError
       if (result.sources !== undefined) {
+        // The reader is total: a stage it cannot make sense of reads as "no
+        // articulation". The diagnostics it reports on the way there are what
+        // turn a silently static stage into an honest one.
+        const diagnostics = []
         try {
-          articulation = await readArticulation(result.sources)
+          articulation = await readArticulation(result.sources, message => diagnostics.push(message))
         } catch (error) {
           articulationError = error instanceof Error ? error.message : String(error)
+        }
+        if (articulation === undefined && diagnostics.length > 0) {
+          articulationError = diagnostics.slice(0, 4).join('; ')
         }
       }
       // Picking is the only reason to keep any vertex array on the CPU, so the

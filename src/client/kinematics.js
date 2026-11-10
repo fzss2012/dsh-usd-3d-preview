@@ -61,6 +61,8 @@ function smootherstep(value) {
  * @property {() => ({ min: [number, number, number], max: [number, number, number] } | undefined)} extremeBounds -
  *   the stage-space envelope to frame: the rest pose unioned with the poses the
  *   controls can reach; `undefined` when nothing is drivable.
+ * @property {string[]} warnings - binding-time limitations (composed-path
+ *   ambiguity, instanced batches left static) the panel should name.
  * @property {() => void} dispose - release what this controller added to the root.
  */
 
@@ -116,13 +118,72 @@ function bindArticulation(root, articulation) {
   const hasColliders = colliderData.length > 0
   if (movingParts === 0 && hasColliders === false) return undefined
 
+  /** Binding-time approximations and limitations the panel can surface. */
+  const warnings = []
+  const warned = new Set()
+  const warnOnce = (message) => {
+    if (warned.has(message)) return
+    warned.add(message)
+    warnings.push(message)
+  }
+
   // ── snapshot the assembled scene, then re-parent it ─────────────────────
   root.updateMatrixWorld(true)
   const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert()
   const meshes = []
   root.traverse((node) => { if (node.isMesh === true) meshes.push(node) })
 
-  /** The deepest body whose prim path contains `path`, or -1. */
+  /** Split an absolute prim path into its components, root slash dropped. */
+  const partsOf = (path) => path.split('/').filter(part => part !== '')
+  const bodyParts = bodies.map(body => partsOf(body.path))
+
+  /**
+   * Match a composed mesh path to a body authored inside one of the layers.
+   *
+   * The engine hands meshes their composed stage path (`/World/Robot/Bodies/…`)
+   * while a referenced asset's physics prims are authored relative to that
+   * asset's own root (`/Bodies/…`), so an exact ancestor walk finds nothing for
+   * a referenced articulated asset. A body is a candidate when its component
+   * path appears as a contiguous interior run of the mesh path (the run must be
+   * followed by at least one component, i.e. the mesh is a descendant of the
+   * body prim, never the body prim itself). The longest run wins; an equal-length
+   * tie between two bodies is ambiguous and reported, not guessed.
+   * @returns body index, or -1 when nothing (or more than one thing) matches.
+   */
+  const suffixMatchBody = (path) => {
+    const parts = partsOf(path)
+    let best = -1
+    let bestLength = 0
+    let bestEnd = -1
+    let ambiguous = false
+    for (let index = 0; index < bodyParts.length; index += 1) {
+      const candidate = bodyParts[index]
+      if (candidate.length === 0) continue
+      for (let start = 0; start + candidate.length < parts.length; start += 1) {
+        let match = true
+        for (let offset = 0; offset < candidate.length; offset += 1) {
+          if (candidate[offset] !== parts[start + offset]) { match = false; break }
+        }
+        if (match === false) continue
+        const end = start + candidate.length
+        if (candidate.length > bestLength || (candidate.length === bestLength && end > bestEnd)) {
+          best = index
+          bestLength = candidate.length
+          bestEnd = end
+          ambiguous = false
+        } else if (candidate.length === bestLength && end === bestEnd && index !== best) {
+          ambiguous = true
+        }
+      }
+    }
+    if (ambiguous === true) {
+      warnOnce(`${path} matches more than one body prim path; left static`)
+      return -1
+    }
+    return best
+  }
+
+  /** The body a mesh belongs to: exact ancestor first, then a composed path. */
   const findBody = (path) => {
     if (typeof path !== 'string' || path === '') return -1
     let at = path
@@ -130,10 +191,10 @@ function bindArticulation(root, articulation) {
       const index = bodyIndexByPath.get(at)
       if (index !== undefined) return index
       const cut = at.lastIndexOf('/')
-      if (cut <= 0) return -1
+      if (cut <= 0) break
       at = at.slice(0, cut)
     }
-    return -1
+    return suffixMatchBody(path)
   }
 
   const groups = bodies.map((body, index) => {
@@ -154,8 +215,12 @@ function bindArticulation(root, articulation) {
     if (index < 0) continue
     // A PointInstancer batch keeps only the instancer's own prim path, so
     // "every instance belongs to one body" cannot be established; leaving the
-    // batch static is the only honest choice (documented in the header).
-    if (mesh.isInstancedMesh === true) continue
+    // batch static is the only honest choice (documented in the header), but
+    // the panel has to say that this body's instances stayed static.
+    if (mesh.isInstancedMesh === true) {
+      warnOnce(`${bodies[index].path}: an instanced mesh batch stays static (per-instance prim paths are not kept)`)
+      continue
+    }
     const stageWorld = new THREE.Matrix4().multiplyMatrices(rootInverse, mesh.matrixWorld)
     const local = new THREE.Matrix4().multiplyMatrices(restWorldInverse[index], stageWorld)
     moved.push({ mesh, matrix: mesh.matrix.clone(), autoUpdate: mesh.matrixAutoUpdate })
@@ -590,6 +655,7 @@ function bindArticulation(root, articulation) {
   return {
     movingParts,
     hasColliders,
+    warnings,
     tick,
     pick,
     setAll,

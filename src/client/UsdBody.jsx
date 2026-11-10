@@ -350,6 +350,16 @@ export function UsdBody(props) {
   if (parsed?.articulationError !== undefined) {
     notices.push(`${label('articulationFailed', 'The moving parts could not be read')}: ${parsed.articulationError}`)
   }
+  // The reader and the controller both report approximations (assumed limits,
+  // unsupported joint kinds, ambiguous composed paths, static instance batches).
+  // Dropping them would make a guessed pose look authored.
+  const partWarnings = [...(parsed?.articulation?.warnings ?? []), ...(parsed?.parts?.warnings ?? [])]
+  if (partWarnings.length > 0) {
+    const heading = label('partWarnings', 'Moving parts')
+    const shown = partWarnings.slice(0, 4).join('; ')
+    const more = partWarnings.length > 4 ? ` (+${partWarnings.length - 4})` : ''
+    notices.push(`${heading}: ${shown}${more}`)
+  }
 
   const stats = parsed === null ? undefined : [
     `${label('format', 'Container')}: ${parsed.format}`,

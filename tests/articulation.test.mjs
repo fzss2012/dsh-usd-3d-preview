@@ -1040,6 +1040,148 @@ settle(pickParts)
 pickParts.dispose()
 say('controller pick matrix  empty/null/group/fixed/unowned/instanced -> false, drivable leaf -> true')
 
+// ── the crate container: same articulated structure as the ASCII layer ──────
+
+// three's crate parser hands back inlined vectors as their raw 32-bit payload;
+// a double3 xformOp:translate would then read as a scalar and put a body at
+// (256, 0, 0). The fixture is the ASCII mixed stage converted with usdcat, so
+// the two containers must agree on every number the controller uses.
+const mixedCrateBytes = new Uint8Array(await readFile(join(fixtures, 'mixed.usdc')))
+const mixedCrate = await readArticulation(new Map([['mixed.usdc', new Blob([mixedCrateBytes])]]))
+assert.ok(mixedCrate !== undefined, 'mixed.usdc: no articulation read')
+assert.deepEqual(mixedCrate.warnings, [], 'mixed.usdc: warnings')
+assert.equal(mixedCrate.bodies.length, mixed.bodies.length, 'mixed.usdc: body count')
+const asciiBodies = new Map(mixed.bodies.map(body => [body.path, body]))
+for (const body of mixedCrate.bodies) {
+  const source = asciiBodies.get(body.path)
+  assert.ok(source !== undefined, 'mixed.usdc: unexpected body ' + body.path)
+  assertMatrixClose(new THREE.Matrix4().fromArray(body.matrix), new THREE.Matrix4().fromArray(source.matrix), 1e-5,
+    'mixed.usdc: rest matrix of ' + body.path)
+}
+const crateLeaf = mixedCrate.bodies.find(body => body.path === '/Mixed/Bodies/leaf')
+assert.ok(crateLeaf !== undefined, 'mixed.usdc: the hinge body is missing')
+const crateLeafPosition = new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(crateLeaf.matrix))
+assertVectorClose(crateLeafPosition, new THREE.Vector3(0, 1, 0), 1e-6,
+  'mixed.usdc: an inlined double3 translate was read as a scalar (leaf body at ' + crateLeafPosition.toArray().join(', ') + ')')
+const asciiJoints = new Map(mixed.joints.map(joint => [joint.id, joint]))
+assert.equal(mixedCrate.joints.length, mixed.joints.length, 'mixed.usdc: joint count')
+for (const joint of mixedCrate.joints) {
+  const source = asciiJoints.get(joint.id)
+  assert.ok(source !== undefined, 'mixed.usdc: unexpected joint ' + joint.id)
+  assert.equal(joint.type, source.type, joint.id + ': type')
+  assert.equal(joint.unit, source.unit, joint.id + ': unit')
+  assert.equal(joint.body0, source.body0, joint.id + ': body0')
+  assert.equal(joint.body1, source.body1, joint.id + ': body1')
+  assertVectorClose(new THREE.Vector3().fromArray(joint.axis), new THREE.Vector3().fromArray(source.axis), 1e-6, joint.id + ': axis')
+  assertVectorClose(new THREE.Vector3().fromArray(joint.pivot), new THREE.Vector3().fromArray(source.pivot), 1e-4, joint.id + ': pivot')
+  for (const key of ['lower', 'upper', 'home', 'open']) {
+    assert.ok(Math.abs(joint[key] - source[key]) <= 1e-5, joint.id + ': ' + key + ' is ' + joint[key] + ', expected ' + source[key])
+  }
+}
+assert.equal(mixedCrate.colliders.length, mixed.colliders.length, 'mixed.usdc: collider count')
+for (let index = 0; index < mixedCrate.colliders.length; index += 1) {
+  const crate = mixedCrate.colliders[index]
+  const source = mixed.colliders[index]
+  assert.equal(crate.path, source.path, 'mixed.usdc: collider path')
+  assert.equal(crate.body, source.body, 'mixed.usdc: collider body')
+  assert.deepEqual(Array.from(crate.indices), Array.from(source.indices), 'mixed.usdc: collider indices')
+  assert.equal(crate.positions.length, source.positions.length)
+  for (let at = 0; at < crate.positions.length; at += 1) {
+    assert.ok(Math.abs(crate.positions[at] - source.positions[at]) <= 1e-4,
+      'mixed.usdc: collider vertex ' + at + ' is ' + crate.positions[at] + ', expected ' + source.positions[at])
+  }
+}
+say('fixture mixed.usdc      crate parity: ' + mixedCrate.bodies.length + ' bodies, '
+  + mixedCrate.joints.length + ' joints, ' + mixedCrate.colliders.length + ' collider, 0 warnings, leaf @ (0, 1, 0)')
+
+// ── a referenced articulated asset: composed paths resolve to layer bodies ──
+
+// The composed stage names the asset's meshes with a prefix the asset layer
+// never authored (/World/Robot/Arm/... vs /Arm/...). Exact ancestor matching
+// finds no body for them; composed-path matching has to, without matching a
+// similarly-named non-body prim.
+const referencedBytes = async name => new Blob([new Uint8Array(await readFile(join(fixtures, name)))])
+const referenced = await readArticulation(new Map([
+  ['referenced-root.usda', await referencedBytes('referenced-root.usda')],
+  ['referenced-asset.usda', await referencedBytes('referenced-asset.usda')],
+]))
+assert.ok(referenced !== undefined, 'referenced asset: no articulation read')
+assert.deepEqual(referenced.bodies.map(body => body.name), ['base', 'link'], 'referenced asset: body order')
+assert.equal(referenced.joints.length, 1, 'referenced asset: joint count')
+assert.equal(referenced.joints[0].body0, '/Arm/Bodies/base')
+assert.equal(referenced.joints[0].body1, '/Arm/Bodies/link')
+assert.equal(referenced.colliders.length, 1, 'referenced asset: collider')
+assert.equal(referenced.colliders[0].body, '/Arm/Bodies/link', 'referenced asset: collider body')
+assert.deepEqual(referenced.warnings, [], 'referenced asset: warnings')
+
+const referencedScene = sceneOf([
+  { name: '/World/Robot/Arm/Bodies/base/post', matrix: translation(0, 0, 0), points: boxPoints(-0.05, 0, -0.05, 0.05, 2, 0.05) },
+  { name: '/World/Robot/Arm/Bodies/link/panel', matrix: translation(0, 1, 0), points: boxPoints(0, -0.5, -0.02, 0.9, 0.5, 0.02) },
+  { name: '/World/Robot/Arm/Bodies/linklet/panel', matrix: translation(0.4, 1.2, 0) },
+])
+const referencedRest = snapshotStage(referencedScene)
+const referencedParts = createArticulationController(referencedScene, referenced)
+assert.ok(referencedParts !== undefined, 'referenced asset: the controller refused to bind')
+assert.equal(referencedParts.movingParts, 1, 'referenced asset: movingParts')
+const referencedPanel = referencedScene.getObjectByName('/World/Robot/Arm/Bodies/link/panel')
+const referencedLinkGroup = bodyGroup(referencedScene, '/Arm/Bodies/link')
+assert.ok(referencedLinkGroup !== undefined, 'referenced asset: no body group for the composed link')
+assert.equal(referencedPanel.parent, referencedLinkGroup, 'referenced asset: the composed mesh was not re-parented into its body')
+const referencedLinklet = referencedScene.getObjectByName('/World/Robot/Arm/Bodies/linklet/panel')
+assert.equal(referencedLinklet.parent, referencedScene, 'referenced asset: a lookalike path matched a body')
+assert.equal(referencedParts.pick([{ object: referencedLinklet }]), false, 'referenced asset: the lookalike mesh drove a joint')
+assertRestPose(referencedScene, referencedRest, 1e-9, 'referenced asset: bind moved the rest pose')
+// Driving the composed mesh swings about the authored hinge frame, exactly as
+// the layer-local case does: corner (0.9, 0.5, 0) -> (0, 0.5, -0.9) at 90 deg.
+assert.equal(referencedParts.pick([{ object: referencedPanel }]), true, 'referenced asset: the composed mesh did not drive its joint')
+settle(referencedParts)
+assertVectorClose(stagePointOf(referencedScene, referencedPanel, 0.9, -0.5, 0), new THREE.Vector3(0, 0.5, -0.9), 1e-6,
+  'referenced asset: the composed part did not swing about the hinge')
+referencedParts.setCollidersVisible(true)
+const referencedOverlay = referencedLinkGroup.children.find(child => /\(collider\)$/.test(child.name))
+assert.ok(referencedOverlay !== undefined, 'referenced asset: the collider overlay was not attached to the composed body')
+assert.equal(referencedOverlay.visible, true, 'referenced asset: the collider overlay was not shown')
+const referencedHull = referencedOverlay.children.find(child => child.isMesh === true)
+assert.ok(Math.abs(new THREE.Vector3().fromBufferAttribute(referencedHull.geometry.getAttribute('position'), 0).y - 0.5) < 1e-6,
+  'referenced asset: the collider hull was not baked in stage space')
+referencedParts.setCollidersVisible(false)
+assert.deepEqual(referencedParts.warnings, [], 'referenced asset: binding reported warnings for an unambiguous match')
+referencedParts.dispose()
+say('referenced asset       composed paths -> 1 body group, mesh re-parented, lookalike static, drive + collider OK')
+
+// ── warnings are reported, not swallowed ──────────────────────────────────
+
+// A joint with no axis and no limits can still be driven, but only by guessing.
+// The reader has to say so, both in the returned warnings and to a caller that
+// passes a diagnostic callback (the panel uses it to explain a static stage).
+const guessedSource = new Blob([new TextEncoder().encode(`#usda 1.0
+def Xform "R"
+{
+    def Xform "a" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "b" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (1, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def PhysicsRevoluteJoint "j"
+    {
+        rel physics:body0 = </R/a>
+        rel physics:body1 = </R/b>
+    }
+}
+`)])
+const heardWarnings = []
+const guessed = await readArticulation(new Map([['guessed.usda', guessedSource]]), message => heardWarnings.push(message))
+assert.ok(guessed !== undefined, 'guessed.usda: the joint was not read at all')
+assert.ok(guessed.warnings.some(warning => /no travel limits/.test(warning)), 'an assumed travel range was not reported')
+assert.ok(guessed.warnings.some(warning => /physics:axis/.test(warning)), 'the missing axis fallback was not reported')
+assert.equal(heardWarnings.length >= 2, true, 'the diagnostic callback did not receive the warnings')
+say('warnings               assumed limits + missing axis reported to the caller (' + heardWarnings.length + ' messages)')
+
 // ── a real articulated asset, when the environment points at one ───────────
 
 // The authored fixtures above are enough to prove the parser and the controller,
