@@ -1199,7 +1199,9 @@ function readCrateLayer(bytes) {
   // A static crate costs a full container decode (its token table is LZ4), but
   // building 100k spec objects for a stage with no Physics prim is waste.
   if (tokens.some(token => typeof token === 'string' && (token.startsWith('Physics') || token.startsWith('physics:'))) === false) {
-    return new Map()
+    // Same shape as the full decode below: a bare prim Map here would leave
+    // `layer.prims` undefined for every earlier layer and abort the read-back.
+    return { prims: new Map(), warnings: [] }
   }
   const specs = parser.specsByPath ?? {}
   const apiSchemas = crateApiSchemas(parser)

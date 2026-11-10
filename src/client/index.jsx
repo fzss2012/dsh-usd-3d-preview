@@ -32,6 +32,58 @@ const NS = 'usd3dPreview'
 /** Required browser services: the slot registry, copy, the preview registry, and workspace bytes. */
 export const inject = ['slots', 'locale', 'documentPreviews', 'remote', 'remote.workspaceFiles']
 
+/** One byte window for a layer above the Host's complete-read cap. */
+const READ_WINDOW_BYTES = 2 * 1024 * 1024
+
+/** Ceiling for the windowed fallback, so a corrupt stat cannot grow without bound. */
+const READ_WINDOW_LIMIT_BYTES = 512 * 1024 * 1024
+
+/**
+ * Read one referenced layer in byte windows when the Host refuses a complete read.
+ *
+ * The Host caps a complete read at `workspaceFiles.maxFileBytes` (32 MiB by
+ * default) and one window at `maxBytes` (2 MiB by default); the window is halved
+ * when a deployment configures a smaller cap. One `stat` call supplies the size.
+ * Dropping the layer instead would compose an empty stage — a SimReady robot's
+ * geometry layer is commonly ~90 MiB.
+ * @param ctx - the client root context carrying the workspace Remote.
+ * @param sessionId - the Session whose workspace resolves the path.
+ * @param path - workspace path of the layer.
+ * @param signal - owning tab lifetime.
+ * @returns the assembled bytes, or undefined when the layer cannot be read.
+ */
+async function readInWindows(ctx, sessionId, path, signal) {
+  const remote = ctx.remote?.workspaceFiles
+  if (remote === undefined || typeof remote.stat !== 'function') return undefined
+  const stat = await remote.stat(sessionId, path, signal)
+  if (stat.ok !== true) return undefined
+  const total = stat.value?.bytes
+  if (!Number.isSafeInteger(total) || total <= 0 || total > READ_WINDOW_LIMIT_BYTES) return undefined
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  let window = READ_WINDOW_BYTES
+  while (offset < total) {
+    const length = Math.min(window, total - offset)
+    const part = await remote.readBytes(
+      sessionId, path, { range: { offset, length } }, signal,
+    )
+    if (part.ok !== true) {
+      // Only a window above the deployment cap is worth retrying smaller.
+      if (part.error?.code === 'workspace-file/too-large' && window > 64 * 1024) {
+        window = Math.floor(window / 2)
+        continue
+      }
+      return undefined
+    }
+    const chunk = part.value?.data
+    if (chunk === undefined || chunk.byteLength === 0) return undefined
+    const take = Math.min(chunk.byteLength, total - offset)
+    bytes.set(chunk.subarray(0, take), offset)
+    offset += take
+  }
+  return bytes
+}
+
 /**
  * Client plugin body: register the dictionaries, the suffix metadata, the
  * viewport, and the sibling-layer/asset readers.
@@ -57,7 +109,13 @@ export function apply(ctx) {
         // the bytes live under `value`, and a failure is the honest "this layer
         // does not exist", which the engine reports as a missing layer.
         const result = await ctx.remote.workspaceFiles.readBytes(sessionId, path, {}, signal)
-        return result.ok ? result.value.data : undefined
+        if (result.ok) return result.value.data
+        // A solved asset's geometry layer is commonly far above the Host's
+        // complete-read cap (default 32 MiB; a SimReady robot's is ~92 MiB).
+        // The Host still serves byte windows, so reassemble the layer instead
+        // of dropping it and composing an empty stage.
+        if (result.error?.code !== 'workspace-file/too-large') return undefined
+        return await readInWindows(ctx, sessionId, path, signal)
       },
       // `s3://…` references are served by the host half, which signs the read
       // against the S3-compatible object storage configured through the
