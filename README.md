@@ -331,9 +331,13 @@ object-storage reference example.
   so only the primary instance is driven correctly.
 - **Articulated stages keep one copy of the vertex arrays** (position / normal / uv) so that
   raycast picking works; static stages still release them.
-- **32 MiB per file read.** That is the host's `workspaceFiles.readBytes` `maxFileBytes`
-  default, and referenced layers share it. It is a host setting, not something this plugin
-  can change; an over-limit file reports an explicit read failure rather than an empty stage.
+- **One read per referenced layer, byte-windowed above the Host cap.** The Host refuses a
+  complete read above `workspaceFiles.maxFileBytes` (default 32 MiB) and one window above
+  `maxBytes` (default 2 MiB). The reader asks for the complete layer first and, when the Host
+  refuses it as too large, reassembles the layer from byte windows instead of dropping it —
+  a solved SimReady robot's geometry layer is commonly ~90 MiB and would otherwise compose an
+  empty stage. The fallback costs one Remote round-trip per window (and one `stat`), so a very
+  large layer loads slower; raising `maxFileBytes` on the Host is still the cheapest option.
 - **Workspace references must be workspace-relative paths.** `@https://…@`, drive-letter
   absolute paths, and files outside the workspace cannot be read; the engine reports them as
   `layer-missing` and they appear in the warnings list.

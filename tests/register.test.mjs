@@ -56,7 +56,11 @@ const client = registration.factory(requireStub)
 assert.equal(typeof client.apply, 'function', 'the client half exports no apply()')
 assert.deepEqual([...requested].sort(), ['react', 'react/jsx-runtime'], 'unexpected external module requests')
 
-const seen = { effects: [], definitions: [], locales: [], injects: [], slots: [], reads: [] }
+/** A file larger than the Host's complete-read cap, for the windowed fallback. */
+const LARGE = new Uint8Array(2 * 1024 * 1024 + 7)
+for (let index = 0; index < LARGE.length; index += 1) LARGE[index] = index % 251
+
+const seen = { effects: [], definitions: [], locales: [], injects: [], slots: [], reads: [], windows: [], stats: [] }
 const ctx = {
   locale: {
     bind: () => key => (key === 'title' ? 'USD 三维预览' : key),
@@ -73,14 +77,43 @@ const ctx = {
   },
   remote: {
     workspaceFiles: {
-      async readBytes(sessionId, path) {
+      async readBytes(sessionId, path, options) {
         seen.reads.push({ sessionId, path })
         // The Client Remote answers with a result envelope: the bytes are under
         // `value`, and a failure (the layer is absent) is a non-ok result.
         if (path === 'workspace/missing.usda') {
           return { ok: false, error: { code: 'workspace-file/not-found', message: 'no such file', details: { path } } }
         }
+        if (path === 'workspace/large.usd') {
+          const range = options?.range
+          if (range === undefined) {
+            return {
+              ok: false,
+              error: { code: 'workspace-file/too-large', message: 'over the complete-read cap', details: { path, limit: 32 * 1024 * 1024 } },
+            }
+          }
+          // This Host's window cap is 1 MiB; a window above it is refused.
+          if (range.length > 1024 * 1024) {
+            return { ok: false, error: { code: 'workspace-file/too-large', message: 'over the window cap', details: { path, limit: 1024 * 1024 } } }
+          }
+          seen.windows.push({ offset: range.offset, length: range.length })
+          return {
+            ok: true,
+            value: {
+              data: LARGE.slice(range.offset, Math.min(LARGE.length, range.offset + range.length)),
+              offset: range.offset,
+              bytes: LARGE.length,
+            },
+          }
+        }
         return { ok: true, value: { data: new Uint8Array([1, 2, 3]), bytes: 3 } }
+      },
+      async stat(sessionId, path) {
+        seen.stats.push({ sessionId, path })
+        return {
+          ok: true,
+          value: { absolutePath: '/workspace/' + path, version: 'v1', bytes: path === 'workspace/large.usd' ? LARGE.length : 3 },
+        }
       },
     },
   },
@@ -147,6 +180,19 @@ assert.equal(
   undefined,
   'a failed Remote read must resolve undefined',
 )
+
+// A Host that refuses a complete read above its cap must not lose the layer:
+// the reader stats it and reassembles it from byte windows. This is what makes
+// a real solved robot (a ~92 MiB geometry layer) previewable at all.
+const largeLayer = await injected.readLayer('session-1', 'workspace/large.usd', undefined)
+assert.ok(largeLayer instanceof Uint8Array, 'the windowed fallback must return bytes')
+assert.equal(largeLayer.length, LARGE.length, 'the windowed fallback must assemble the whole layer')
+let checksum = 0
+for (const byte of largeLayer) checksum = (checksum + byte) >>> 0
+assert.equal(checksum, LARGE.reduce((sum, byte) => (sum + byte) >>> 0, 0), 'the assembled bytes must match')
+assert.equal(seen.stats.length, 1, 'the windowed fallback must stat the layer once')
+assert.ok(seen.windows.length >= 3, 'the layer must arrive in several windows')
+assert.ok(seen.windows.every(window => window.length <= 1024 * 1024), 'a window must respect the Host cap')
 
 assert.equal(seen.locales.length, 1)
 const [dictionary] = seen.locales

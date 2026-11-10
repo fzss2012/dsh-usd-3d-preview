@@ -1094,6 +1094,22 @@ for (let index = 0; index < mixedCrate.colliders.length; index += 1) {
 say('fixture mixed.usdc      crate parity: ' + mixedCrate.bodies.length + ' bodies, '
   + mixedCrate.joints.length + ' joints, ' + mixedCrate.colliders.length + ' collider, 0 warnings, leaf @ (0, 1, 0)')
 
+// A composed stage can carry crate layers with no physics prims at all (the
+// geometry and material payloads of a solved robot). Those crates take the fast
+// rejection path; it must return the same { prims, warnings } shape as a full
+// decode, or every earlier layer's `.prims` becomes undefined and the whole
+// read-back aborts. This is the shape the H01 simready robot exposed.
+const geometryCrate = new Blob([new Uint8Array(await readFile(join(fixtures, '..', 'sample.usdc')))])
+const doorWithCrate = await readArticulation(new Map([
+  ['door.usda', new Blob([new Uint8Array(await readFile(join(fixtures, 'door.usda')))])],
+  ['geometries.usdc', geometryCrate],
+]), message => { throw new Error('unexpected articulation diagnostic: ' + message) })
+assert.ok(doorWithCrate !== undefined, 'a non-physics crate layer must not abort the read-back')
+assert.equal(doorWithCrate.bodies.length, 2, 'non-physics crate: body count')
+assert.equal(doorWithCrate.joints.length, 1, 'non-physics crate: door joint')
+assert.deepEqual(doorWithCrate.warnings, [], 'non-physics crate: warnings')
+say('non-physics crate      door articulation survives a geometry-only crate layer')
+
 // ── a referenced articulated asset: composed paths resolve to layer bodies ──
 
 // The composed stage names the asset's meshes with a prefix the asset layer
