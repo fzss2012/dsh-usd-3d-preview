@@ -1,0 +1,150 @@
+#usda 1.0
+(
+    defaultPrim = "Mixed"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# One stage with all three joints the preview understands, plus one authored
+# collision hull:
+#
+#   * a revolute hinge, base -> leaf, limits -60..60 degrees about Y;
+#   * a prismatic slide, base -> tray, limits 0..0.3 along X;
+#   * a fixed bolt, base -> plate, which transmits motion but cannot be driven;
+#   * a purpose="guide" hull under the leaf, which the engine never draws.
+#
+# The two drivable parts sit on opposite sides of the stage (leaf left, tray
+# right) so a render test can prove they are driven independently. Both joints
+# also author an open pose beyond their travel limit (`simready:far`), which the
+# reader has to clamp to the limit: 120 -> 60 degrees and 0.6 -> 0.3 units.
+#
+# The leaf panel reaches 0.9 m from the hinge axis and the tray front is a box,
+# so a controller that rotated about the wrong pivot or translated along the
+# wrong axis moves visibly wrong geometry rather than a few pixels.
+
+def Xform "Mixed"
+{
+    def Xform "Bodies"
+    {
+        def Xform "base"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 10
+            def Mesh "mount"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(-0.15, 0, -0.15), (0.15, 0, -0.15), (0.15, 0, 0.15), (-0.15, 0, 0.15), (-0.15, 0.2, -0.15), (0.15, 0.2, -0.15), (0.15, 0.2, 0.15), (-0.15, 0.2, 0.15)]
+            }
+        }
+
+        def Xform "leaf"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 3
+            def Mesh "panel"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(0, -0.5, -0.02), (0.9, -0.5, -0.02), (0.9, -0.5, 0.02), (0, -0.5, 0.02), (0, 0.5, -0.02), (0.9, 0.5, -0.02), (0.9, 0.5, 0.02), (0, 0.5, 0.02)]
+            }
+
+            def Scope "collision"
+            {
+                def Mesh "c0000"
+                (
+                    prepend apiSchemas = ["PhysicsCollisionAPI"]
+                )
+                {
+                    uniform token purpose = "guide"
+                    token physics:approximation = "convexHull"
+                    bool physics:collisionEnabled = 1
+                    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                    int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                    point3f[] points = [(0, -0.5, -0.04), (0.9, -0.5, -0.04), (0.9, -0.5, 0), (0, -0.5, 0), (0, 0.5, -0.04), (0.9, 0.5, -0.04), (0.9, 0.5, 0), (0, 0.5, 0)]
+                }
+            }
+        }
+
+        def Xform "tray"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (1.5, 0.2, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 1
+            def Mesh "front"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(-0.15, -0.15, -0.3), (0.15, -0.15, -0.3), (0.15, -0.15, 0.3), (-0.15, -0.15, 0.3), (-0.15, 0.15, -0.3), (0.15, 0.15, -0.3), (0.15, 0.15, 0.3), (-0.15, 0.15, 0.3)]
+            }
+        }
+
+        def Xform "plate"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0.6, 1.5, 0.6)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 1
+            def Mesh "board"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(-0.3, -0.25, -0.05), (0.3, -0.25, -0.05), (0.3, -0.25, 0.05), (-0.3, -0.25, 0.05), (-0.3, 0.25, -0.05), (0.3, 0.25, -0.05), (0.3, 0.25, 0.05), (-0.3, 0.25, 0.05)]
+            }
+        }
+    }
+
+    def PhysicsRevoluteJoint "hinge"
+    (
+        prepend apiSchemas = ["PhysicsDriveAPI:angular"]
+    )
+    {
+        uniform token physics:axis = "Y"
+        float physics:lowerLimit = -60
+        float physics:upperLimit = 60
+        point3f physics:localPos0 = (0, 1, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        float simready:far = 120
+        rel physics:body0 = </Mixed/Bodies/base>
+        rel physics:body1 = </Mixed/Bodies/leaf>
+    }
+
+    def PhysicsPrismaticJoint "slide"
+    {
+        uniform token physics:axis = "X"
+        float physics:lowerLimit = 0
+        float physics:upperLimit = 0.3
+        point3f physics:localPos0 = (1.5, 0.2, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        float simready:far = 0.6
+        rel physics:body0 = </Mixed/Bodies/base>
+        rel physics:body1 = </Mixed/Bodies/tray>
+    }
+
+    def PhysicsFixedJoint "bolt"
+    {
+        point3f physics:localPos0 = (0.6, 1.5, 0.6)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        rel physics:body0 = </Mixed/Bodies/base>
+        rel physics:body1 = </Mixed/Bodies/plate>
+    }
+}

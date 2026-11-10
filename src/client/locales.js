@@ -22,6 +22,16 @@ export const zh = {
   size: '尺寸',
   format: '容器',
   help: '左键旋转 · 滚轮缩放 · 右键平移',
+  movingParts: '可动部件',
+  pickPart: '点击部件开合',
+  openAll: '全部打开',
+  closeAll: '全部收起',
+  homeParts: '复位部件',
+  colliders: '碰撞体',
+  articulationFailed: '可动部件无法解析',
+  partWarnings: '可动部件提示',
+  ground: '地面',
+  shadows: '阴影',
 }
 
 /** English dictionary with the same keys. */
@@ -46,4 +56,14 @@ export const en = {
   size: 'Size',
   format: 'Container',
   help: 'Drag to orbit · wheel to zoom · right-drag to pan',
+  movingParts: 'Moving parts',
+  pickPart: 'Click a part to open or close it',
+  openAll: 'Open all',
+  closeAll: 'Close all',
+  homeParts: 'Home parts',
+  colliders: 'Colliders',
+  articulationFailed: 'The moving parts could not be read',
+  partWarnings: 'Moving parts',
+  ground: 'Ground',
+  shadows: 'Shadows',
 }

@@ -155,3 +155,49 @@ export function referenceKey(basePath, reference) {
   const clean = reference.startsWith('./') ? reference.slice(2) : reference
   return basePath === '' ? clean : `${basePath}/${clean}`
 }
+
+/** An `s3://bucket/key` reference body, tolerating OpenUSD's collapsed `s3:/bucket/key` spelling. */
+const ASSET_URI = /^s3:\/{1,2}([^/]+)\/(.+)$/
+
+/**
+ * Split one object-storage reference.
+ * @param reference - the `@…@` body as written in a layer.
+ * @returns the bucket, the key, and the canonical URI, or undefined for a non-asset reference.
+ */
+export function assetUriOf(reference) {
+  const match = ASSET_URI.exec(reference)
+  if (match === null) return undefined
+  const bucket = match[1]
+  const key = match[2]
+  if (key === '') return undefined
+  return { bucket, key, uri: `s3://${bucket}/${key}` }
+}
+
+/**
+ * The directory one asset URI lives in, with a trailing slash.
+ * @param uri - a canonical `s3://bucket/key` URI.
+ * @returns the directory prefix.
+ */
+export function assetBaseOf(uri) {
+  const slash = uri.lastIndexOf('/')
+  return slash <= 's3://'.length ? `s3://${uri.slice('s3://'.length)}/` : uri.slice(0, slash + 1)
+}
+
+/**
+ * Resolve a reference written inside an asset layer against that layer's directory.
+ *
+ * An asset layer is located by URI, not by a workspace path, so its relative
+ * references resolve in the same URI space instead of against the workspace.
+ * @param base - the referencing layer's asset base (see {@link assetBaseOf}).
+ * @param reference - the `@…@` body as written.
+ * @returns the canonical absolute URI.
+ */
+export function resolveAssetReference(base, reference) {
+  const clean = reference.startsWith('./') ? reference.slice(2) : reference
+  const prefix = 's3://'
+  const afterScheme = base.startsWith(prefix) ? base.slice(prefix.length) : base
+  const bucketEnd = afterScheme.indexOf('/')
+  const bucket = bucketEnd < 0 ? afterScheme : afterScheme.slice(0, bucketEnd)
+  const directory = bucketEnd < 0 ? '' : afterScheme.slice(bucketEnd + 1)
+  return `s3://${bucket}/${normalizePosix(`${directory}${clean}`)}`
+}

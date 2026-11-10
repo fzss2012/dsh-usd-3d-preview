@@ -9,10 +9,13 @@
  * clicking a `.usd` file in the Files tab lands here while every other file
  * keeps its existing renderer.
  *
- * The third thing this half owns is the reader a layer uses to reach the layers
- * it references. It is injected rather than imported: `loadUsd` takes a function,
- * so the assembly stays testable without a host, and the workspace Remote stays
- * the only thing that knows how to find a sibling file.
+ * The third thing this half owns is the readers a layer uses to reach the layers
+ * it references. They are injected rather than imported: `loadUsd` takes
+ * functions, so the assembly stays testable without a host, and the workspace
+ * Remote stays the only thing that knows how to find a sibling file. `s3://…`
+ * references go through this plugin's own host route instead, which signs them
+ * against S3-compatible object storage configured by environment variables — the
+ * browser cannot sign, and an unsigned read of that bucket is a 403.
  *
  * `inject` names the runtime services this body cannot work without. The
  * document preview registry is one of them, and waiting for it is also what
@@ -31,7 +34,7 @@ export const inject = ['slots', 'locale', 'documentPreviews', 'remote', 'remote.
 
 /**
  * Client plugin body: register the dictionaries, the suffix metadata, the
- * viewport, and the sibling-layer reader.
+ * viewport, and the sibling-layer/asset readers.
  * @param ctx - the client root context carrying slots, copy, the preview
  * registry, and the workspace Remote.
  */
@@ -55,6 +58,17 @@ export function apply(ctx) {
         // does not exist", which the engine reports as a missing layer.
         const result = await ctx.remote.workspaceFiles.readBytes(sessionId, path, {}, signal)
         return result.ok ? result.value.data : undefined
+      },
+      // `s3://…` references are served by the host half, which signs the read
+      // against the S3-compatible object storage configured through the
+      // DSH_USD_S3_* environment variables. The browser cannot sign, and an
+      // unsigned read of that bucket is a 403. The route is an exact Fetch route
+      // on the shared /api channel, so the same-origin session credential and
+      // the Host/Origin trust fence apply before the host signs anything.
+      readAsset: async (uri, signal) => {
+        const response = await fetch(`/api/usd-preview/asset?uri=${encodeURIComponent(uri)}`, { signal })
+        if (!response.ok) return undefined
+        return new Uint8Array(await response.arrayBuffer())
       },
     }),
   }, UsdBody)), 'usd-3d-preview: document body')

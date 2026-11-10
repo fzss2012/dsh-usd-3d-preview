@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    defaultPrim = "Static"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# No physics at all: the normal case. The reader has to reject this from the
+# bytes alone, without building anything.
+
+def Xform "Static"
+{
+    def Mesh "cube"
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+        point3f[] points = [(-0.5, 0, -0.5), (0.5, 0, -0.5), (0.5, 0, 0.5), (-0.5, 0, 0.5), (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5)]
+    }
+    def Mesh "lid"
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+        point3f[] points = [(0, 0.5, -0.5), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5), (0, 0.5, 0.5), (0, 0.7, -0.5), (0.5, 0.7, -0.5), (0.5, 0.7, 0.5), (0, 0.7, 0.5)]
+    }
+}

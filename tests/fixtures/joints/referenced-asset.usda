@@ -1,0 +1,78 @@
+#usda 1.0
+(
+    defaultPrim = "Arm"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A small articulated asset meant to be referenced into another stage, the way a
+# SimReady mechanism is placed in a scene. Paths are authored relative to this
+# layer's root ("/Arm/..."); the referencing stage composes them under a prefix,
+# which is what the composed-path body matching in kinematics.js must resolve.
+
+def Xform "Arm"
+{
+    def Xform "Bodies"
+    {
+        def Xform "base"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 5
+            def Mesh "post"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(-0.05, 0, -0.05), (0.05, 0, -0.05), (0.05, 0, 0.05), (-0.05, 0, 0.05), (-0.05, 2, -0.05), (0.05, 2, -0.05), (0.05, 2, 0.05), (-0.05, 2, 0.05)]
+            }
+        }
+
+        def Xform "link"
+        (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 2
+            def Mesh "panel"
+            {
+                int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                point3f[] points = [(0, -0.5, -0.02), (0.9, -0.5, -0.02), (0.9, -0.5, 0.02), (0, -0.5, 0.02), (0, 0.5, -0.02), (0.9, 0.5, -0.02), (0.9, 0.5, 0.02), (0, 0.5, 0.02)]
+            }
+
+            def Scope "collision"
+            {
+                def Mesh "c0000"
+                (
+                    prepend apiSchemas = ["PhysicsCollisionAPI"]
+                )
+                {
+                    uniform token purpose = "guide"
+                    token physics:approximation = "convexHull"
+                    bool physics:collisionEnabled = 1
+                    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+                    int[] faceVertexIndices = [1, 2, 3, 0, 7, 6, 5, 4, 4, 5, 1, 0, 2, 6, 7, 3, 3, 7, 4, 0, 5, 6, 2, 1]
+                    point3f[] points = [(0, -0.5, -0.04), (0.9, -0.5, -0.04), (0.9, -0.5, 0), (0, -0.5, 0), (0, 0.5, -0.04), (0.9, 0.5, -0.04), (0.9, 0.5, 0), (0, 0.5, 0)]
+                }
+            }
+        }
+    }
+
+    def PhysicsRevoluteJoint "hinge"
+    {
+        uniform token physics:axis = "Y"
+        float physics:lowerLimit = -90
+        float physics:upperLimit = 90
+        point3f physics:localPos0 = (0, 1, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        rel physics:body0 = </Arm/Bodies/base>
+        rel physics:body1 = </Arm/Bodies/link>
+    }
+}

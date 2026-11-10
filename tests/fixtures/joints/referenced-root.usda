@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A stage that places the articulated asset by reference under /World/Robot,
+# with no transform on the referencing prim: the composed prim paths carry a
+# prefix the asset layer never authored, which is the case composed-path body
+# matching exists for. The reference itself is consumed by the engine's
+# composition; this fixture is read as two layers by the articulation reader.
+
+def Xform "World"
+{
+    def Xform "Robot" (
+        prepend references = @./referenced-asset.usda@
+    )
+    {
+    }
+}

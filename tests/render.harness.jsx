@@ -8,7 +8,13 @@
  * slot system, and React scheduling by the conversation view) is replaced.
  *
  * `t` is deliberately absent: the seat supplies it only when the dictionary is
- * registered, and the body must fall back to its literal copy without it.
+ * registered, and the body must fall back to its literal English copy without it.
+ *
+ * The asset reader is the host route's browser-side half. The test server wires
+ * the real host handler, so an `s3://` reference would be signed and read from
+ * the configured asset library exactly as the app would do it; when no library is
+ * configured the route answers 503 and the engine reports the layer as missing,
+ * which is the same fallback the app shows.
  */
 import { createRoot } from 'react-dom/client'
 import { UsdBody } from '../src/client/UsdBody.jsx'
@@ -36,6 +42,15 @@ createRoot(document.getElementById('host')).render(
       const layer = await fetch(`/fixture/${layerPath}`, { signal })
       if (!layer.ok) return undefined
       return new Uint8Array(await layer.arrayBuffer())
+    }}
+    // The asset reader is the host route's browser-side half; the test server
+    // wires the real host handlers behind their /api trust-fenced Fetch routes,
+    // so an `s3://` reference is signed and read from the same asset library the
+    // app would use.
+    readAsset={async (uri, signal) => {
+      const response = await fetch(`/api/usd-preview/asset?uri=${encodeURIComponent(uri)}`, { signal })
+      if (!response.ok) return undefined
+      return new Uint8Array(await response.arrayBuffer())
     }}
   />,
 )

@@ -50,6 +50,8 @@ await mkdir(lib, { recursive: true })
 // engine does not rewrite the source file (and does not disturb HMR).
 const engineDir = join(root, 'node_modules', '@huggingface', 'usd-web-viewer')
 const generatedPath = join(root, 'src/client/engine-assets.generated.js')
+/** Patch counts are tracked per build: an engine move must fail the build, never ship a silent no-op. */
+const workerPatch = { count: 0 }
 const workerBundle = await build({
   entryPoints: [join(engineDir, 'dist/esm/worker.js')],
   bundle: true,
@@ -59,7 +61,9 @@ const workerBundle = await build({
   target: 'chrome120',
   legalComments: 'none',
   logLevel: 'warning',
+  plugins: [patchEngineTransport(workerPatch)],
 })
+assertEngineTransportPatch(workerPatch, 'worker bundle')
 const workerText = workerBundle.outputFiles[0].text
 const wasmBytes = await readFile(join(engineDir, 'dist/wasm/usd_wasm_bg.wasm'))
 const digest = sha256().update(workerText).update(wasmBytes).digest('hex').slice(0, 16)
@@ -102,7 +106,87 @@ const host = await build({
 report('lib/index.js', host.outputFiles[0].text)
 await writeFile(join(lib, 'index.js'), host.outputFiles[0].text, 'utf8')
 
+// ── engine transport patch ──────────────────────────────────────────────────
+/**
+ * Teach the engine's asset transport about `s3://`.
+ *
+ * `requestFor()` (in `@huggingface/usd-web-viewer/dist/esm/load-core.js`, which the
+ * worker bundle inlines) picks a transport from the asset URL's scheme:
+ *
+ *     if (protocol === LOCAL && rootUrl.startsWith(LOCAL)) return localResponse(files, url)
+ *     if (url !== rootUrl && protocol !== 'http:' && protocol !== 'https:') throw TypeError
+ *
+ * The `files` package table is wired into the `local:` arm only, so a crate's
+ * absolute `s3://bucket/...` reference throws **before** a package key is looked
+ * up — no key spelling can satisfy it. That is why a stage composes only the
+ * layers whose references are relative or that this plugin rewrote itself.
+ *
+ * The patch adds the missing arm: `s3:` URLs are fetched through the host half's
+ * signed asset route (see `src/host/index.js`), which is same-origin from the
+ * worker and sits behind the Connection service's browser-trust fence and
+ * session credential. Nothing else changes.
+ *
+ * The plugin counts the modules it patched, and each build asserts the count:
+ * if the engine renames `requestFor`, moves it to another module, or drops the
+ * module from the graph, the build fails instead of shipping a silent no-op.
+ */
+// A function declaration, not a const: the worker build above runs before this
+// point in the file and must still be able to use the plugin.
+/**
+ * @param counter - mutable count the plugin increments once per patched module.
+ * @returns the esbuild plugin that rewrites `load-core`'s asset transport.
+ */
+function patchEngineTransport(counter) {
+  const assetRoute = '/api/usd-preview/asset'
+  return {
+    name: 'usd-engine-s3-transport',
+    setup(context) {
+      context.onLoad({ filter: /load-core\.js$/ }, async (args) => {
+        const source = await readFile(args.path, 'utf8')
+        const anchor = 'export function requestFor(rootUrl, files) {\n'
+          + '    return async (url) => {\n'
+          + '        const { protocol } = new URL(url);\n'
+        if (!source.includes(anchor)) {
+          throw new Error('load-core.js: the requestFor() anchor changed — update patchEngineTransport in build.mjs')
+        }
+        const arm = [
+          '        if (protocol === "s3:") {',
+          '            // Object-storage layer: the host half signs the read.',
+          `            const target = new URL(${JSON.stringify(assetRoute)}, self.location.origin);`,
+          '            target.searchParams.set("uri", url);',
+          '            return fetch(target.href, {',
+          '                credentials: "same-origin",',
+          '                referrerPolicy: "no-referrer",',
+          '            });',
+          '        }',
+          '',
+        ].join('\n')
+        counter.count += 1
+        return { contents: source.replace(anchor, anchor + arm), loader: 'js' }
+      })
+    },
+  }
+}
+
+/**
+ * Refuse to continue when the engine transport patch did not run exactly once:
+ * zero means the anchor moved away silently, more than one means the module
+ * graph changed shape and the patch was applied twice.
+ * @param counter - the count collected by `patchEngineTransport`.
+ * @param label - the build the count belongs to, for the failure message.
+ */
+function assertEngineTransportPatch(counter, label) {
+  if (counter.count !== 1) {
+    throw new Error(
+      `${label}: the engine transport patch ran ${String(counter.count)} time(s), expected exactly 1 — `
+      + 'update patchEngineTransport in build.mjs for the installed @huggingface/usd-web-viewer',
+    )
+  }
+}
+
 // ── browser half ────────────────────────────────────────────────────────────
+/** The browser bundle imports the viewer package too, so it must patch the same module. */
+const clientPatch = { count: 0 }
 const client = await build({
   entryPoints: [join(root, 'src/client/index.jsx')],
   bundle: true,
@@ -113,10 +197,12 @@ const client = await build({
   jsx: 'automatic',
   // The platform module table's seed words. Anything else must be bundled.
   external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client'],
+  plugins: [patchEngineTransport(clientPatch)],
   legalComments: 'inline',
   logLevel: 'warning',
   banner: { js: '/* dsh-usd-3d-preview: generated by build.mjs from src/client — do not edit this file. */' },
 })
+assertEngineTransportPatch(clientPatch, 'browser bundle')
 const wrapped = `window.__ModuleLoader__.load({
 \tid: ${JSON.stringify(manifest.name)},
 \tfactory: (require) => {

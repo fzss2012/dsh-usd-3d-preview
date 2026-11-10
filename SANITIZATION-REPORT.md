@@ -8,6 +8,17 @@
 | Target | this repository — 36 tracked files, one initial commit |
 | Goal | publish the core capability (OpenUSD composition in the browser) with **no** internal asset-library, toolchain, or machine-path information |
 
+> **Update 2026-11-08 — release 2.0.0.** The full version of the plugin's interactive
+> capability set was re-integrated into this repository under the same release rules:
+> interactive `UsdPhysics` articulation and colliders, the studio rendering/on-demand view,
+> and read-only S3-compatible object-storage support. It was ported with the same
+> sanitization policy as 1.0.0: no internal toolchain names, no configuration-file
+> discovery, no internal machine/project paths or scene data, no internal design-report
+> citations or measurements, and no credentials. The object-storage path is now a
+> documented public feature configured **only** through `DSH_USD_S3_*` environment
+> variables (see README). Section 7 records the 2.0.0 audit; §3.1 remains the historical
+> 1.0.0 audit.
+
 ## 1. What was kept
 
 The capability the plugin exists for is untouched:
@@ -146,18 +157,23 @@ all 3 suites passed
 ```
 
 The suite was run twice in a row; both runs were green. The render suite resolves Playwright from
-`node_modules`, `PLAYWRIGHT_MODULE`, or a global npm install, and prints `SKIP` plus exit 0 when
-no browser is available (the offline suites still run).
+`node_modules`, `PLAYWRIGHT_MODULE`, or a global npm install. Without a browser it prints `SKIP`,
+and the runner now treats a skip as failure (`DSH_ALLOW_BROWSER_SKIP=1` permits offline-only
+runs); the committed CI workflow installs Playwright so the full suite runs there.
 
 ## 5. Known gaps
 
-1. **Cloud asset-library support is gone.** Stages whose geometry is stored in an object-storage
-   bucket no longer resolve; those references appear in the warnings list as `layer-missing`
-   instead of being fetched. Bringing the capability back would need a public, credential-free
-   read path and a documented descriptor format — it was removed rather than generalised.
-2. **The host half is empty.** There is no host route and no host-side test any more. Any future
-   host feature must be routed and tested separately; `src/host/index.js` exists only because a
-   dsh bundle needs a host entry and `dsh.client` is what makes the browser half reachable.
+1. **Cloud asset-library support, as re-added in 2.0.0, needs explicit configuration.** The
+   binary crate/file references still have no public credential-free resolution, so the
+   implementation added in 2.0.0 is a deliberately generalised one: an S3-compatible
+   object-storage endpoint is configured through `DSH_USD_S3_*` environment variables, reads
+   are signed by the host half only, and nothing is fetched when the variables are unset
+   (those references appear as `layer-missing`). Crate-internal absolute `s3://` references
+   additionally need the opt-in equal-length crate patcher.
+2. **The host half is a pair of read-only routes.** It registers `/api/usd-preview/{health,asset}`
+   as exact Fetch routes on the Connection service and has no other capability. Any future host
+   feature must be routed and tested separately; the routes are covered by the offline `s3`
+   suite (which mounts the Connection Fetch-route surface) and the render suite's host wiring.
 3. **Coverage that only the internal fixtures provided is narrowed.** The absolute-root
    read-back case (a session address whose path is absolute, so the engine's root key carries a
    directory) and an unreachable-reference case are no longer exercised by a committed fixture;
@@ -169,9 +185,12 @@ no browser is available (the offline suites still run).
 5. **No lockfile is committed** (see §3.3). `npm install` resolves the dependency ranges in
    `package.json`; two installs on different days can therefore resolve different transitive
    versions of the build tools.
-6. **The render suite needs an environment** — Playwright + Chromium, and optionally Pillow for
-   the colour probe. Without them the suite skips loudly rather than failing, which is good for
-   contributors but means CI must install them explicitly to get real coverage.
+6. **The browser suites need an environment** — Playwright + Chromium (the pixel probe decodes
+   with Chromium itself, so no Python/Pillow is needed). Without them the
+   render/articulation-render/studio suites print `SKIP`, and `npm test` now fails on a skip
+   instead of reporting a false green (`DSH_ALLOW_BROWSER_SKIP=1` allows offline-only runs);
+   the committed CI workflow installs Playwright so the full suite runs there, while
+   register/parse/articulation/s3 run offline.
 
 ## 6. Reproducing this checkout
 
@@ -181,4 +200,66 @@ npm run build
 npm test
 ```
 
-No remote is configured and nothing was pushed; the repository ships as a local initial commit.
+The 1.0.0 checkout shipped as a local initial commit with no remote configured; the 2.0.0
+capability set is a normal follow-up change on `main`.
+
+## 7. 2.0.0 update audit (2026-11-08)
+
+### 7.1 What was ported, and in what shape
+
+Brought over from the full version of the plugin, then sanitized:
+
+- **interactive USD**: `src/client/articulation.js` (UsdPhysics read-back from the same layer
+  bytes the engine composed: bodies, revolute/prismatic/fixed joints, axes/limits/home, a
+  hand-decoded `apiSchemas` `TokenListOp` for crate layers, collider prims) and
+  `src/client/kinematics.js` (pure forward kinematics, picking, toolbar actions, collider
+  overlay, framing envelope);
+- **studio view**: `src/client/studio.js` and `src/client/view.js`, plus the `UsdBody`
+  integration of both;
+- **read-only object storage**: `src/host/s3.js` (SigV4 GET with `node:crypto`, memory/disk
+  cache), `src/host/index.js` (the two read-only routes), `src/client/engine.js` asset
+  localization/prefetch/aliases, `src/client/usd.js` asset-URI helpers, the `readAsset`
+  injection in `src/client/index.jsx`, and the build-time engine transport patch;
+- the matching tests and authored fixtures (articulation/studio/pixel-level browser suites,
+  `joints/*.usda`, an object-storage reference fixture).
+
+### 7.2 What was deliberately not ported, or was rewritten
+
+- the internal toolchain's configuration-file discovery and its credential-reading path: the
+  object-storage configuration is now **environment-only** (`DSH_USD_S3_*`), no file is read,
+  and no credentials are stored or logged;
+- internal toolchain names, product names, descriptor-file names, object-storage service
+  names, internal machine/project paths and internal scene measurements;
+- internal design-report section citations and internal verification numbers in comments,
+  tests and documentation;
+- internal debug probes, internal real-asset probes and internal scene fixtures. The
+  remaining real-asset tests are opt-in through generic environment variables
+  (`DSH_USD_TEST_SIMREADY`, `DSH_USD_TEST_SCENE`) and skip when unset;
+- the internal-only Chinese UI copy: this repository keeps English as the default copy, with
+  both the `en` and `zh` dictionaries carrying the new strings.
+
+### 7.3 Audit of the combined 2.0.0 tree
+
+The §3.1 pattern is unchanged except that **the public `s3://` URI scheme is now a documented
+feature token**, not an internal marker: object storage support is part of the public
+capability set and is exercised by tests. With exactly that token excluded:
+
+```text
+$ git grep -I -n -E '<§3.1 pattern without the s3 URI prefix>' 
+$ echo $LASTEXITCODE
+1                        # no match
+```
+
+- internal toolchain name / abbreviation: **0**
+- asset-library descriptor name: **0** (the host-side accessor is named `storageLibrary`, so
+  even a case-insensitive substring scan is clean)
+- object-storage service name: **0**
+- internal project/design-asset root paths and Windows absolute machine paths: **0**
+- internal brand names (CJK and ASCII), content-repository name: **0**
+- internal design-report citations (`§`): **0**
+- hard-coded credentials, private keys, `password`/`secret` assignments: **0**
+- `package-lock.json` remains uncommitted (§3.3), so no lockfile/integrity-string noise.
+
+The public `s3://` scheme appears only in the documented feature (host signer, engine
+localization, asset-URI helpers, README, and the `tests/fixtures/remote` example).
+
