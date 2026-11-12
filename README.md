@@ -28,7 +28,7 @@ dsh-usd-3d-preview
 ├─ lib/client.js           browser half (classic-CJS module-table entry; three, the WASM engine,
 │                          articulation/kinematics and the studio view are inlined)
 ├─ src/                    the only source of truth: host/ + client/
-├─ tests/                  seven suites (including real Chromium pixel tests) + fixtures
+├─ tests/                  nine suites (including real Chromium pixel tests) + fixtures
 └─ cordis.patch.yml        bundle patch layer: one `ui-usd-3d-preview` entry
 ```
 
@@ -60,9 +60,10 @@ Measured by `npm test` (fixtures are committed; the render suites draw them in C
 | `.usdz` (zip package) | ✅ unzipped, root layer + textures together | ✅ |
 | `subLayers = [@./x.usda@]` | ✅ (fixture: 3 layers / 2 meshes / 4 triangles) | ❌ not implemented |
 | `prepend references = @../x.usd@` | ✅ composed after a workspace read-back | ✅ (ASCII only, and only the `prepend` spelling) |
+| File opened from an absolute address | ✅ the engine composes the root and its `s3://` payloads; relative sibling layers have no Session reader and are reported as warnings | ⚠️ root geometry only |
 | `UsdGeomPointInstancer` | ✅ every placement drawn; same prototype + material merges into one `InstancedMesh`, budget 100k instances | ❌ not implemented — only the prototype is drawn once |
 | Nested `PointInstancer` | ✅ recursively expanded: 2×3 = **6** quads, three levels 2×3×3 = **18** | ❌ as above |
-| Custom-typed instancer prims | ✅ a prim whose fields are exactly `PointInstancer`'s is retyped on the way in | ❌ |
+| Custom-typed instancer prims | ✅ a prim whose **own** fields are `PointInstancer`'s is retyped on the way in, at any nesting depth; a container that merely holds one is left alone | ❌ |
 | Multi-level reference chains | ✅ the engine reports the layers it lacks → each is read back → recompose (up to 8 passes) | ✅ regex scan + BFS (24-layer cap) |
 | `metersPerUnit` / `upAxis = "Z"` | ✅ normalised to Y-up / metres by the engine | ✅ handled by `USDComposer` |
 | Materials / primvars / variant selection | ✅ `UsdPreviewSurface`, `OmniPBR`, glTF MDL (**MaterialX renders grey**, see limitations) | ✅ `UsdPreviewSurface`, OpenPBR, MaterialX image nodes |
@@ -268,7 +269,7 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # register + drop + parse + articulation + s3 + studio + articulation-render + render
+npm test               # instancer + register + drop + parse + s3 + articulation + studio + articulation-render + render
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
 
@@ -311,13 +312,14 @@ the patch layer.
 | Suite | What it proves |
 |---|---|
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
+| `instancer` | the custom-type rewrite in isolation: a prim whose **own** fields carry `protoIndices` and `prototypes`/`positions` is promoted, a custom group around an instancer is not, and a prim with only part of the signature stays untouched — the container case is what protects a nested custom-instancer library |
 | `drop` | the external-asset path without a browser: name/key helpers, stage candidates and the auto-open rule, BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, picker collection, and the capture-phase sidebar listener against a faked document (USD drag claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
 | `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and both `/api/usd-preview/*` routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, and that a throwing frame observer stops the loop instead of hot-looping |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
-| `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, articulated fixture — each must draw a non-flat frame and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |
+| `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |
 
 The browser suites need Playwright + Chromium. Without a browser they print `SKIP`, and `npm test`
 fails instead of reporting a false green — set `DSH_ALLOW_BROWSER_SKIP=1` to run the offline suites
@@ -345,8 +347,11 @@ Fixtures: `tests/fixtures/sample.{usda,usd,usdc,usdz}` are four containers of on
 exported by Blender (`tests/make-fixtures.py` regenerates them); `refs/unit.usda →
 refs/geom/body.usda` is a reference chain; `arcs/root.usda → sub/base.usda + ref/body.usda`
 is a sublayer + reference combination that three's composer cannot do at all;
-`joints/*.usda` are hand-authored `UsdPhysics` stages; `remote/root.usda` is an
-object-storage reference example.
+`joints/*.usda` are hand-authored `UsdPhysics` stages; `instancer/custom-nested.usda`
+is a custom-typed instancer library whose prototypes are custom instancers reached
+through external prim paths; `instancer/payload/root.usda` is the same shape with
+the inner instancer and its prototype inside a payload layer (2 layers, 4 quads);
+`remote/root.usda` is an object-storage reference example.
 
 ## Limitations
 
@@ -399,6 +404,10 @@ object-storage reference example.
 - **A UTF-8 BOM breaks the engine's ASCII reader** (`Logos error`). The plugin strips the first
   three bytes before handing bytes over; `tests/fixtures/arcs/root.usda` is deliberately
   BOM-prefixed as a regression fixture.
+- **An absolute-address stage has no sibling reader.** A `dsh-resource://file/absolute/…`
+  address carries no Session, so the engine can compose the opened layer and its `s3://`
+  payloads but relative workspace references stay missing (and appear as warnings). Files
+  opened through a Session address keep their workspace reader.
 - **Object storage needs explicit configuration** (see above): environment-only, path-style,
   no STS session tokens, read-only, and crate-internal absolute `s3://` references need the
   opt-in crate patcher.

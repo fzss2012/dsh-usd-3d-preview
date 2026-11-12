@@ -52,7 +52,11 @@ assert.equal(defaultStage(['a.usd', 'b.usd']), undefined)
 assert.equal(defaultStage([]), undefined)
 
 // ── a text layer loses its BOM and a custom instancer type ───────────────────
-const custom = '#usda 1.0\ndef Grid "row" {\n    int[] protoIndices = [0]\n}\n'
+// The signature is PointInstancer's own: `protoIndices` plus a placement
+// (`positions`) or the `prototypes` relationship. A prim carrying only
+// `protoIndices` is not an instancer, which is what keeps a custom grouping prim
+// from being promoted and hiding the hierarchy under it (see instancer.test.mjs).
+const custom = '#usda 1.0\ndef Grid "row" {\n    int[] protoIndices = [0]\n    point3f[] positions = [(0, 0, 0)]\n}\n'
 const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...encoder.encode(custom)])
 const normalised = await normalizeLayer('root.usda', new Blob([bom]))
 const text = decoder.decode(new Uint8Array(await normalised.arrayBuffer()))

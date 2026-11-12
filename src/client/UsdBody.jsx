@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createArticulationController } from './kinematics.js'
 import { assemble, disposeObject } from './parse.js'
-import { assetUriOf, parseFileReference, siblingPath, usdFileName } from './usd.js'
+import { absoluteFilePath, assetUriOf, parseFileReference, siblingPath, usdFileName } from './usd.js'
 import { createView } from './view.js'
 
 const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
@@ -236,6 +236,12 @@ export function UsdBody(props) {
         // A layer reaches its siblings by name; only the session it belongs to
         // knows where that name lives, and the address carries the session.
         const reference = parseFileReference(resourceAddress)
+        // An `absolute` address has no Session to read siblings through, but it
+        // still names a complete file the Host handed over. Composing that file
+        // through the engine keeps PointInstancers and `s3://` payloads, which
+        // three's fallback cannot draw; unresolved siblings become warnings.
+        const absolutePath = absoluteFilePath(resourceAddress)
+        const rootKey = reference?.path ?? absolutePath
         const readWorkspace = reference === undefined || readerRef.current === undefined
           ? async () => undefined
           : (path, signal) => readerRef.current(reference.sessionId, path, signal)
@@ -257,7 +263,7 @@ export function UsdBody(props) {
           ? async () => undefined
           : (relative, signal) => readWorkspace(siblingPath(reference.path, relative), signal)
         const result = await assemble({
-          rootKey: reference?.path,
+          rootKey,
           rootBytes: data,
           read: readFile,
           readSibling,

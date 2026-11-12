@@ -21,21 +21,28 @@ import { UsdBody } from '../src/client/UsdBody.jsx'
 
 const params = new URLSearchParams(location.search)
 const path = params.get('path') ?? 'sample.usdz'
+// `?absolute=1` exercises the scope with no Session: the address names an
+// absolute path and the engine must compose it anyway, because PointInstancers
+// and `s3://` payloads have no fallback parser.
+const absolute = params.get('absolute') === '1'
 // `?root=` fakes the way the app addresses a file: a session-scoped address whose
 // path is the absolute file path, so the engine's root key carries a directory.
-const rootPath = params.get('root') ?? path
+const rootPath = params.get('root') ?? (absolute ? `home/harness/${path}` : path)
 // `?engine=three` exercises the fallback path without touching the source.
 if (params.get('engine') === 'three') globalThis.__DSH_USD_ENGINE__ = 'three'
 const response = await fetch(`/fixture/${path}`)
 if (!response.ok) throw new Error(`fixture ${path}: HTTP ${response.status}`)
 const data = new Uint8Array(await response.arrayBuffer())
+const address = absolute
+  ? `dsh-resource://file/absolute/${rootPath.replace(/^\/+/, '')}`
+  : `dsh-resource://file/session/session-harness/${rootPath}`
 
-globalThis.__harness = { path, rootPath, bytes: data.byteLength }
+globalThis.__harness = { path, rootPath, absolute, bytes: data.byteLength }
 
 createRoot(document.getElementById('host')).render(
   <UsdBody
     content={{ kind: 'bytes', data }}
-    resourceAddress={`dsh-resource://file/session/session-harness/${rootPath}`}
+    resourceAddress={address}
     // The app's reader goes through the workspace Remote; here the same
     // contract is answered by the fixture server, keyed the same way.
     readLayer={async (_sessionId, layerPath, signal) => {

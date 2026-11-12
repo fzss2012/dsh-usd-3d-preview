@@ -21,8 +21,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadUsd, measureObject, usdFormatOf } from '../src/client/parse.js'
 import {
-  layerBasePath, normalizePosix, parseFileReference, referenceKey, siblingPath,
-  USD_EXTENSIONS, usdDefinition, usdFileName,
+  absoluteFilePath, layerBasePath, normalizePosix, parseFileReference, referenceKey,
+  siblingPath, USD_EXTENSIONS, usdDefinition, usdFileName,
 } from '../src/client/usd.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
@@ -111,6 +111,17 @@ assert.deepEqual(
   { sessionId: 'session-1', path: 'workspace/models/robot arm.usdz' },
 )
 assert.equal(parseFileReference('dsh-resource://file/absolute/C:/x/y.usd'), undefined)
+
+// The absolute scope names a file outside any Session. It has no sibling reader,
+// but its path is still the engine root key, which is what keeps a stage opened
+// from an absolute link composed by the engine instead of the fallback parser.
+assert.equal(absoluteFilePath('dsh-resource://file/absolute/home/a/b.usda'), '/home/a/b.usda')
+assert.equal(absoluteFilePath('dsh-resource://file/absolute/C:/x/y.usd'), 'C:/x/y.usd')
+assert.equal(absoluteFilePath('dsh-resource://file/absolute//server/share/x.usd'), '//server/share/x.usd')
+assert.equal(absoluteFilePath('dsh-resource://file/absolute/a%20b/c.usd'), '/a b/c.usd')
+assert.equal(absoluteFilePath('dsh-resource://file/absolute/'), undefined)
+assert.equal(absoluteFilePath('dsh-resource://file/session/s/a.usd'), undefined)
+assert.equal(absoluteFilePath('dsh-resource://file/absolute/a.usd?rev=1#top'), '/a.usd')
 assert.equal(parseFileReference('dsh-resource://file/session/only-a-session'), undefined)
 
 assert.equal(siblingPath('workspace/models/robot.usdz', './geom/body.usda'), 'workspace/models/geom/body.usda')

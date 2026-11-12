@@ -51,6 +51,41 @@ export function usdDefinition(title) {
   }
 }
 
+/** Prefix of the file-address scope that names a path outside any Session. */
+const ABSOLUTE_FILE_PREFIX = 'dsh-resource://file/absolute/'
+
+/**
+ * The absolute path of a `dsh-resource://file/absolute/…` address.
+ *
+ * The absolute scope carries no Session, so it cannot read sibling layers, but
+ * it still names a file the Host delivered complete bytes for. Composing that
+ * file through the engine is what lets a stage outside every workspace keep its
+ * PointInstancers, custom-typed instancers, and `s3://` payloads; the fallback
+ * parser has none of those. Segments are decoded individually, a UNC path keeps
+ * its leading double slash, and a Windows drive stays drive-rooted.
+ * @param address - a `dsh-resource://file/` address.
+ * @returns the absolute path, or undefined for any other scope or a malformed address.
+ */
+export function absoluteFilePath(address) {
+  const clean = String(address).split('?')[0].split('#')[0]
+  if (!clean.startsWith(ABSOLUTE_FILE_PREFIX)) return undefined
+  const body = clean.slice(ABSOLUTE_FILE_PREFIX.length)
+  if (body === '' || body.endsWith('/')) return undefined
+  let segments
+  try {
+    segments = body.split('/').map(decodeURIComponent)
+  } catch {
+    return undefined
+  }
+  if (segments[0] === '') {
+    // A UNC path keeps one empty first segment in the address.
+    if (segments.length < 2 || segments[1] === '') return undefined
+    return `//${segments.slice(1).join('/')}`
+  }
+  if (/^[A-Za-z]:$/.test(segments[0])) return segments.join('/')
+  return `/${segments.join('/')}`
+}
+
 /**
  * The decoded last path segment of a file resource address.
  *

@@ -63,8 +63,15 @@ const PRIM_HEADER = /(^|\n)([ \t]*)(def|over|class)\s+([A-Za-z_][\w]*)/g
  * at the origin. The attributes already match the schema, so renaming the type is
  * enough to get the placements drawn — no custom schema plugin needed.
  *
- * A prim is rewritten only when its own block carries `protoIndices`, so
- * references and ordinary geometry are never touched.
+ * A prim is rewritten only when its own fields carry `protoIndices` plus either
+ * `prototypes` or `positions`: a container that merely holds an instancer is
+ * left alone, and an ordinary prim with a nested instancer is never promoted.
+ * The scan is textual and depth-agnostic, so custom instancers at any nesting
+ * level are each rewritten — including a custom instancer whose prototype is a
+ * custom instancer itself, which is how a library of repeated modules is usually
+ * authored. Without that per-prim check the outer container would be retyped
+ * into a childless `PointInstancer` and a spec-conforming renderer would draw
+ * none of the hierarchy under it.
  * @param text - one ASCII layer.
  * @returns the same text with custom instancer prim types renamed.
  */
@@ -90,7 +97,11 @@ export function retypeCustomInstancers(text) {
       } else if (char === '{') depth += 1
     }
     if (close < 0) break
-    if (!/\bprotoIndices\b/.test(text.slice(open, close))) continue
+    // Only the prim's *own* fields decide what it is. A container whose child is
+    // an instancer is not one: retyping it would turn a group into a childless
+    // PointInstancer, and a spec-conforming renderer draws no children of one, so
+    // the whole nested hierarchy behind it would disappear.
+    if (!hasInstancerFields(text, open, close)) continue
     const header = text.slice(headerStart, open)
     const typeAt = header.indexOf(type, match[3].length)
     if (typeAt < 0) continue
@@ -102,6 +113,40 @@ export function retypeCustomInstancers(text) {
     out = `${out.slice(0, edit.start)}PointInstancer${out.slice(edit.end)}`
   }
   return out
+}
+
+/**
+ * Whether one prim block declares PointInstancer's fields *directly*.
+ *
+ * The signature is `protoIndices` plus either `prototypes` (the relationship the
+ * schema consumes) or `positions` (its placement array). Nested prim blocks are
+ * skipped, so a grouping prim that contains an instancer never qualifies — which
+ * is exactly what keeps a library of nested custom instancers intact.
+ * @param text - the whole ASCII layer.
+ * @param open - index of the prim block's opening brace.
+ * @param close - index of its matching closing brace.
+ * @returns true when the prim's own fields name it as an instancer.
+ */
+function hasInstancerFields(text, open, close) {
+  let own = ''
+  let depth = 0
+  let start = open + 1
+  for (let index = open + 1; index < close; index += 1) {
+    const char = text[index]
+    if (char === '{') {
+      if (depth === 0) {
+        own += text.slice(start, index)
+        start = index
+      }
+      depth += 1
+    } else if (char === '}') {
+      depth -= 1
+      if (depth === 0) start = index + 1
+    }
+  }
+  own += text.slice(start, close)
+  if (!/\bprotoIndices\b/.test(own)) return false
+  return /\bprototypes\b/.test(own) || /\bpositions\b/.test(own)
 }
 
 /**

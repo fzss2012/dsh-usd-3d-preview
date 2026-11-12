@@ -142,6 +142,14 @@ const CASES = [
   // on the way in is what makes the four placements appear. Without it the prim
   // composes empty and the reported extent collapses to 1 x 0 x 0.
   { path: 'instancer/custom-typed.usda', match: /Size: 1\.000 × 7\.000/, note: 'custom-typed instancer' },
+  // Custom types at two nesting levels, with the inner instancer behind a custom
+  // group: 2 outer placements x 3 inner quads = 6 quads. A retype pass that
+  // promoted the group (or missed the nested instancer) draws 0 or 3.
+  { path: 'instancer/custom-nested.usda', absolute: true, meshes: 6, match: /Layers: 1/, note: 'custom nested instancer' },
+  // The same library shape with the inner instancer inside a payload: the root
+  // places /root/Mod/row twice, and each payload row places the quad twice, so
+  // four quads are drawn and the second layer must have been fetched and retyped.
+  { path: 'instancer/payload/root.usda', meshes: 4, match: /Layers: 2/, note: 'custom instancer behind payload' },
   // The interactive path, on an authored fixture: one revolute joint whose leaf
   // mesh is offset from its body origin, so a controller that rotated about the
   // wrong point would move it visibly wrong rather than subtly.
@@ -288,11 +296,11 @@ const probe = await createPixelProbe(browser)
 const results = []
 try {
   for (const entry of CASES) {
-    const { path, root: caseRoot, meshes, parts, partsAtLeast, toggle, colliders, pick, match, note, warnings } = entry
+    const { path, root: caseRoot, absolute, meshes, parts, partsAtLeast, toggle, colliders, pick, match, note, warnings } = entry
     const page = await browser.newPage({ viewport: { width: 900, height: 640 } })
     const consoleErrors = []
     page.on('pageerror', error => consoleErrors.push(error?.stack ?? String(error)))
-    const query = `?path=${encodeURIComponent(path)}${caseRoot === undefined ? '' : `&root=${encodeURIComponent(caseRoot)}`}`
+    const query = `?path=${encodeURIComponent(path)}${caseRoot === undefined ? '' : `&root=${encodeURIComponent(caseRoot)}`}${absolute === true ? '&absolute=1' : ''}`
     await page.goto(`${origin}/${query}`)
 
     await page.waitForSelector('[data-usd-preview-canvas]', { timeout: 120_000 })

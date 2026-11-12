@@ -1,0 +1,28 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A custom-instancer library whose prototypes are composed through a payload,
+# the shape the building exporter writes: the placement prims live beside the
+# payload, while the module they instance (and the inner instancer that repeats
+# it) lives inside the payload layer. The payload's inner prim is authored under
+# a custom type too, so the rewrite has to reach a layer fetched in a read-back
+# pass, not just the root.
+def Xform "root"
+{
+    def "Mod" (
+        prepend payload = @./modules/leaf.usda@</Mod>
+    )
+    {
+    }
+
+    def Row "row"
+    {
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 0, 0), (2, 0, 0)]
+        rel prototypes = [ </root/Mod/row> ]
+    }
+}

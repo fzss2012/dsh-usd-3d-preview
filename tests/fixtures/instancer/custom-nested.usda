@@ -1,0 +1,44 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Custom-typed nested instancers, the shape a building exporter writes: a library
+# of custom-typed module instancers, another custom type instancing that library,
+# and a grouping prim around the library. Only the two prims that carry
+# PointInstancer's own fields may be retyped; the group must keep its type, or a
+# renderer that skips the children of a childless PointInstancer would drop the
+# whole library. 2 outer placements x 3 inner quads = 6 drawable quads.
+def Xform "root"
+{
+    def Leaf "leaf"
+    {
+        def Mesh "quad"
+        {
+            uniform bool doubleSided = 1
+            int[] faceVertexCounts = [3, 3]
+            int[] faceVertexIndices = [0, 1, 2, 0, 2, 3]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Library "library"
+    {
+        def Row "row"
+        {
+            int[] protoIndices = [0, 0, 0]
+            point3f[] positions = [(0, 0, 0), (2, 0, 0), (4, 0, 0)]
+            rel prototypes = [ </root/leaf> ]
+        }
+    }
+
+    def Wall "wall"
+    {
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(0, 0, 0), (0, 0, 10)]
+        rel prototypes = [ </root/library/row> ]
+    }
+}

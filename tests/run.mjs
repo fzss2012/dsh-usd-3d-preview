@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const SUITES = ['register', 'drop', 'parse', 's3', 'articulation', 'studio', 'articulation-render', 'render']
+const SUITES = ['instancer', 'register', 'drop', 'parse', 's3', 'articulation', 'studio', 'articulation-render', 'render']
 const ALLOW_SKIP = process.env.DSH_ALLOW_BROWSER_SKIP === '1'
 
 /** Run one suite, teeing its output and reporting whether it skipped. */
