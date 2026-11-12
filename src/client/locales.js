@@ -32,6 +32,16 @@ export const zh = {
   partWarnings: '可动部件提示',
   ground: '地面',
   shadows: '阴影',
+  dropGuide: '把外部 USD 资产拖进侧边栏打开',
+  dropTitle: '把 USD 资产拖到这里',
+  dropHint: '从桌面把 .usd / .usda / .usdc / .usdz 拖到本面板，或选择一个文件 / 文件夹；拖入文件夹会连同它引用的图层和贴图一起读取。',
+  dropLocal: '只在本机浏览器内读取，不会上传，也不会写进工作区。',
+  dropOverlay: '松开以在 USD 预览中打开',
+  noStage: '这个拖入项里没有 USD 文件（需要 .usd / .usda / .usdc / .usdz）。',
+  pickFile: '选择文件',
+  pickFolder: '选择文件夹',
+  chooseStage: '这个拖入项包含多个舞台，请选择要打开的一个',
+  openAnother: '打开其他资产',
 }
 
 /** English dictionary with the same keys. */
@@ -66,4 +76,14 @@ export const en = {
   partWarnings: 'Moving parts',
   ground: 'Ground',
   shadows: 'Shadows',
+  dropGuide: 'Open an external USD asset by dropping it on the sidebar',
+  dropTitle: 'Drop a USD asset here',
+  dropHint: 'Drag .usd, .usda, .usdc or .usdz from your desktop onto this panel, or pick a file or a folder — a folder brings the layers and textures it references.',
+  dropLocal: 'Read in this browser only — nothing is uploaded or written to the workspace.',
+  dropOverlay: 'Drop to open in the USD preview',
+  noStage: 'That drop held no USD file (.usd, .usda, .usdc or .usdz).',
+  pickFile: 'Choose file',
+  pickFolder: 'Choose folder',
+  chooseStage: 'That drop carries several stages — choose one to open',
+  openAnother: 'Open another asset',
 }

@@ -147,12 +147,19 @@ function length(value) {
 
 /**
  * Present one USD file as an interactive 3D viewport.
- * @param props - the document body's standard props: complete bytes, address,
- * copy, and the injected workspace reader for referenced layers.
+ *
+ * Two sources reach the same viewport: the document body's standard props
+ * (complete workspace bytes plus the injected reader for referenced layers), and
+ * a dropped external stage (`droppedFiles` + `droppedRootKey`), whose bytes never
+ * entered the workspace. Both assemble through the same WASM engine; only the
+ * place the referenced layers come from differs.
+ * @param props - the document body's standard props, or the dropped-stage pair.
+ * @param props.droppedFiles - dropped files keyed by package-relative path.
+ * @param props.droppedRootKey - the key of the dropped stage to open.
  * @returns the viewport, or the loading/failure state that replaces it.
  */
 export function UsdBody(props) {
-  const { content, resourceAddress } = props
+  const { content, resourceAddress, droppedFiles, droppedRootKey } = props
   const t = props.t
   const data = content !== undefined && content.kind === 'bytes' ? content.data : undefined
   const name = usdFileName(resourceAddress)
@@ -192,7 +199,7 @@ export function UsdBody(props) {
   }, [t])
 
   useEffect(() => {
-    if (data === undefined) {
+    if (data === undefined && droppedFiles === undefined) {
       setParsed(null)
       setFailure(null)
       return undefined
@@ -204,6 +211,28 @@ export function UsdBody(props) {
     // One macrotask, so the status line paints before a large layer blocks the thread.
     const timer = setTimeout(async () => {
       try {
+        // A dropped stage is opened by bytes: the page holds every file, so the
+        // engine composes from the drop's own map and no read is performed.
+        if (droppedFiles !== undefined) {
+          const rootKey = droppedRootKey ?? [...droppedFiles.keys()][0]
+          const rootBlob = rootKey === undefined ? undefined : droppedFiles.get(rootKey)
+          if (rootKey === undefined || rootBlob === undefined || rootBlob === null) {
+            throw new Error('the dropped asset has no root layer')
+          }
+          const result = await assemble({
+            rootKey,
+            rootBytes: new Uint8Array(await rootBlob.arrayBuffer()),
+            files: droppedFiles,
+            signal: controller.signal,
+          })
+          if (cancelled) {
+            if (result.dispose !== undefined) result.dispose()
+            else disposeObject(result.object)
+            return
+          }
+          setParsed(result)
+          return
+        }
         // A layer reaches its siblings by name; only the session it belongs to
         // knows where that name lives, and the address carries the session.
         const reference = parseFileReference(resourceAddress)
@@ -264,7 +293,7 @@ export function UsdBody(props) {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [data, resourceAddress])
+  }, [data, resourceAddress, droppedFiles, droppedRootKey])
 
   useEffect(() => {
     const container = containerRef.current

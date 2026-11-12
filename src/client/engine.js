@@ -457,3 +457,23 @@ export async function loadWithEngine({ rootKey, rootBytes, read, readAsset, sign
   const sources = new Map(files)
   return { ...result, passes, engine: 'wasm', sources }
 }
+
+/**
+ * Compose one stage from files the page already holds.
+ *
+ * This is the drop path: a stage dragged onto the sidebar never becomes a
+ * workspace path, so there is nothing to read back and no second pass. The
+ * engine resolves the stage's references, sublayers and textures against the keys
+ * of `files` itself — a `File.webkitRelativePath` is already the key it looks up —
+ * and reports anything the drop did not carry as a warning.
+ * @param options - assembly inputs.
+ * @param options.files - package-relative paths to the dropped blobs.
+ * @param options.rootKey - the key of the stage to open.
+ * @param options.signal - aborts the load.
+ * @returns the engine result, with the single pass it took recorded.
+ */
+export async function loadWithFiles({ files, rootKey, signal }) {
+  const { wasmUrl, workerUrl } = engineUrls()
+  const result = await loadUsd(rootKey, { files, textures: 'preview', wasmUrl, workerUrl, signal })
+  return { ...result, passes: [{ pass: 1, warnings: result.info.warnings.length, fetched: [] }], engine: 'wasm' }
+}

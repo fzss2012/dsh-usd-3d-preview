@@ -228,6 +228,30 @@ export async function loadUsd({ bytes, readLayer, maxLayers = 24 }) {
 }
 
 /**
+ * Read one dropped layer for the three fallback parser.
+ *
+ * The fallback asks for a path relative to the opened file's directory; a dropped
+ * file is keyed by its path in the drop (which, for a picked folder, starts with
+ * the folder's name). Both spellings are tried so the same drop works whichever
+ * side of the composer asks.
+ * @param files - dropped files keyed by package-relative path.
+ * @param rootKey - the opened stage's key.
+ * @returns a reader answering the layer's bytes, or undefined when absent.
+ */
+function droppedLayerReader(files, rootKey) {
+  const slash = rootKey.lastIndexOf('/')
+  const base = slash < 0 ? '' : rootKey.slice(0, slash + 1)
+  return async (path) => {
+    const normalized = normalizePosix(path)
+    const blob = files.get(path)
+      ?? files.get(normalized)
+      ?? (base === '' ? undefined : files.get(`${base}${normalized}`))
+    if (blob === undefined) return undefined
+    return new Uint8Array(await blob.arrayBuffer())
+  }
+}
+
+/**
  * Assemble one USD file for the preview, preferring the WASM OpenUSD engine.
  *
  * three's parsers are the fallback, not the default: they compose only what the
@@ -241,15 +265,48 @@ export async function loadUsd({ bytes, readLayer, maxLayers = 24 }) {
  * @param options.read - reads one workspace-relative path (engine path).
  * @param options.readSibling - reads a path relative to the opened file's directory (three path).
  * @param options.readAsset - reads one `s3://` asset URI the engine localized into its package.
+ * @param options.files - the dropped files, keyed by package-relative path; when
+ * present the stage is composed from them alone and no read is performed.
  * @param options.signal - aborts the load.
  * @param options.maxLayers - bound for the three fallback's reference walk.
  * @returns the graph, which engine produced it, the measured stats, and warnings.
  */
-export async function assemble({ rootKey, rootBytes, read, readSibling, readAsset, signal, maxLayers = 24 }) {
+export async function assemble({ rootKey, rootBytes, read, readSibling, readAsset, files, signal, maxLayers = 24 }) {
   const format = usdFormatOf(rootBytes)
   // Escape hatch for a broken engine, without a setting or a rebuild:
   //   globalThis.__DSH_USD_ENGINE__ = 'three'
   const engineAllowed = globalThis.__DSH_USD_ENGINE__ !== 'three'
+  // A dropped or picked stage: every file is already in the page, so the engine
+  // resolves the stage's own references from the map instead of a read-back loop.
+  if (engineAllowed && files !== undefined && rootKey !== undefined) {
+    try {
+      const { loadWithFiles } = await import('./engine.js')
+      const result = await loadWithFiles({ files, rootKey, signal })
+      return {
+        object: result.root,
+        engine: 'wasm',
+        format,
+        layers: result.info.stats.layers,
+        passes: result.passes,
+        warnings: result.info.warnings.map(warning => ({ ...warning })),
+        stats: measureObject(result.root),
+        dispose: result.dispose,
+      }
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error
+      const fallback = await loadUsd({ bytes: rootBytes, readLayer: droppedLayerReader(files, rootKey), maxLayers })
+      return {
+        object: fallback.object,
+        engine: 'three',
+        engineError: error instanceof Error ? error.message : String(error),
+        format,
+        layers: fallback.layers,
+        passes: [],
+        warnings: [],
+        stats: measureObject(fallback.object),
+      }
+    }
+  }
   if (engineAllowed && rootKey !== undefined && typeof read === 'function') {
     try {
       const { loadWithEngine } = await import('./engine.js')
