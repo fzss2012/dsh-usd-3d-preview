@@ -24,11 +24,11 @@ It is one package in two halves: a **dsh bundle** and a **browser client plugin*
 
 ```
 dsh-usd-3d-preview
-├─ lib/index.js            host half (ESM; one read-only asset route when object storage is configured)
+├─ lib/index.js            host half (ESM; the trust-fenced asset/health/update routes)
 ├─ lib/client.js           browser half (classic-CJS module-table entry; three, the WASM engine,
 │                          articulation/kinematics and the studio view are inlined)
 ├─ src/                    the only source of truth: host/ + client/
-├─ tests/                  ten suites (including real Chromium pixel tests) + fixtures
+├─ tests/                  eleven suites (including real Chromium pixel tests) + fixtures
 └─ cordis.patch.yml        bundle patch layer: one `ui-usd-3d-preview` entry
 ```
 
@@ -352,7 +352,8 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # objstore + instancer + register + drop + parse + s3 + articulation + studio + articulation-render + render
+npm test               # objstore + update + instancer + register + drop + parse + s3 + articulation + studio + articulation-render + render
+npm run update:local   # update this checkout from its upstream and rebuild (see below)
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
 
@@ -386,9 +387,42 @@ same dependency and appends the bundle to `dsh.profile.bundles`.
 
 Profiles are live: the manifest and the patch file are watched, so no app restart is needed to
 pick the bundle up. The browser half hot-reloads; the host half goes through Node's ESM module
-cache, so a host change (the asset route) needs an app restart. To switch the plugin off,
-disable it in Settings → Plugins, or set `disabled: true` on the `ui-usd-3d-preview` entry in
-the patch layer.
+cache, so a host change needs an app restart. To switch the plugin off, disable it in
+Settings → Plugins, or set `disabled: true` on the `ui-usd-3d-preview` entry in the patch layer.
+
+### Updating a local checkout
+
+Because the install is a `link:` to a built checkout, updating the plugin means: fast-forward
+that checkout, reinstall dependencies only when `package.json` changed, rebuild `lib/`, and let
+the two halves load. The repository ships that procedure once
+([`scripts/update-local.mjs`](scripts/update-local.mjs), wrapping
+[`src/host/update.js`](src/host/update.js)); the terminal and the Web UI both call it.
+
+```bash
+npm run update:local                          # update the current branch
+npm run update:local -- --check               # fetch the upstream and report ahead/behind
+npm run update:local -- --status              # local status only (no network)
+npm run update:local -- --branch feat/example # try another branch locally
+npm run update:local -- --restart             # restart the host after a host-half change
+node scripts/update-local.mjs --json          # machine-readable (the update route uses it)
+```
+
+Rules: the working tree must be clean; the update is a `git merge --ff-only` of the checkout's
+own upstream (never a reset, force, or rebase); only `git`, `npm install --no-audit --no-fund`
+(when `package.json` changed or `node_modules` is missing) and `npm run build` are spawned, with
+fixed argv and no shell interpolation. A published/installed copy without `.git` reports
+"not a git checkout" and changes nothing. `--restart` uses the systemd user service named by
+`DSH_WEB_SERVICE` (default `dsh-web.service`) on Linux, and prints the manual command elsewhere;
+restarting disconnects the open Web UI.
+
+The same procedure has two surfaces in the Web UI: **Settings → Plugins → Update**, and this
+bundle's own detail page in the Plugins panel (an **Update available** badge plus a section with
+*Check for updates*, *Update and rebuild* and, when the host half changed, *Restart DSH Web*).
+Both read `GET /api/usd-preview/update` and post `{ "action": "check" | "update" | "restart" }`
+to the same trust-fenced route as the asset reads — owner-only, and no update starts without a
+click. The browser half hot-reloads after the rebuild; a `lib/index.js` change needs the host
+restart shown in the panel. The first installation of this feature on an older checkout needs one
+terminal update plus a host restart, because the route is itself part of the new host half.
 
 ## Tests
 
@@ -399,8 +433,9 @@ the patch layer.
 | `drop` | the external-asset path without a browser: name/key helpers, stage candidates and the auto-open rule, BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, picker collection, and the capture-phase sidebar listener against a faked document (USD drag claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
-| `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and both `/api/usd-preview/*` routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
+| `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and the asset/health routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
 | `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
+| `update` | the local-checkout updater offline: ahead/behind parsing, dirty/detached/not-a-checkout refusals, check/update/restart actions, the single-update lock, restart command construction, a **real local-git integration** (bare origin + clone: fast-forward, package.json-aware install skip, rebuild, host-change detection, idempotent rerun), and the update route's GET/POST registration with malformed-body/unknown-action refusal |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, and that a throwing frame observer stops the loop instead of hot-looping |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame, stay pickable, and the stats must name the OpenUSD (WASM) engine; a prim-panel case checks the path list, its filter and that a canvas click names the picked prim. Screenshots land in `tests/.artifacts/` |
@@ -505,9 +540,16 @@ This plugin reads **local bytes only** — workspace files through the host's Re
 the user drops on the sidebar through the browser's own file API — plus, when explicitly
 configured through `DSH_USD_S3_*` environment variables, **read-only objects from an
 S3-compatible object storage**. It mounts a preview for four file extensions and a drop entry
-for the same four, and nothing else: no uploads, no outbound network access beyond the
-configured object-storage reads, no credentials stored in the package, no configuration files,
-and no host route other than the authenticated read-only asset route above.
+for the same four, and nothing else: no uploads, no workspace writes, no credentials stored in
+the package, and no configuration files.
+
+Its host routes are all owner-only exact Fetch routes on the authenticated `/api` channel: the
+read-only asset and health routes above, and the local-update route. The update route is the one
+route that mutates the installation rather than reading data: on an explicit click it
+fast-forwards this plugin's own checkout from its configured upstream (a network fetch of that
+git remote), installs dependencies when `package.json` changed, and rebuilds `lib/`. It refuses
+a dirty or detached checkout, never resets or force-updates, and runs only the fixed commands
+named above. A published/installed copy without a `.git` directory cannot update itself.
 
 ## License
 
@@ -525,4 +567,6 @@ MIT — see [LICENSE](LICENSE).
 字节只在浏览器内处理，不上传、不写入工作区。
 可选支持 `s3://` 对象存储引用：由宿主半边用 `DSH_USD_S3_*` 环境变量配置的凭据做只读 SigV4
 签名读取，浏览器侧把 ASCII 图层的 `s3://` 引用本地化到引擎包键后组合。构建：
-`npm install && npm run build && npm test`。
+`npm install && npm run build && npm test`。本地 checkout 可用 `npm run update:local`（或 Web UI 的
+Settings → Plugins「插件更新」页 / 插件详情页）一键更新：快进上游、按需安装依赖、重建 `lib/`；
+若 `lib/index.js` 变化则重启宿主，其余情况客户端 bundle 由 HMR 自动热加载。

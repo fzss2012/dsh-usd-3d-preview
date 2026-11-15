@@ -188,8 +188,11 @@ assert.deepEqual(seen.injects, [
   'sidebar.right.tab.document',
   'sidebar.right.pane.tab',
   'sidebar.right.pane.tab',
+  'settings.plugins.tab',
+  'plugins.detail.badge',
+  'plugins.detail.section',
 ])
-assert.equal(seen.slots.length, 3, 'the document body and both sidebar page bodies are registered once each')
+assert.equal(seen.slots.length, 6, 'the document body, both page bodies and the three update surfaces are registered once each')
 const [body] = seen.slots
 assert.equal(body.options.name, 'sidebar.right.tab.document')
 assert.equal(body.options.key, definition.id, 'the body key must equal the definition id')
@@ -282,6 +285,23 @@ assert.equal(typeof objBody.options.inject, 'function', 'the browser injects the
 const handoff = objBody.options.inject()
 assert.equal(typeof handoff.openDroppedStage, 'function', 'the browser needs a way to open a stage it found')
 
-assert.equal(seen.effects.length, 8, 'every registration is owned by a reversible effect')
+// The local-checkout updater contributes three surfaces: a Settings tab under
+// Plugins and a badge + section on this bundle's own Plugins detail page.
+const updateTab = seen.slots.find(slot => slot.options.name === 'settings.plugins.tab')
+assert.ok(updateTab !== undefined, 'the update Settings tab is registered')
+assert.equal(updateTab.options.id, 'dsh-usd-3d-preview/update')
+assert.equal(updateTab.options.locale, 'usd3dPreview')
+assert.equal(typeof updateTab.options.label, 'function', 'the tab has a localized label')
+assert.equal(typeof updateTab.component, 'function')
+const updateBadge = seen.slots.find(slot => slot.options.name === 'plugins.detail.badge')
+assert.ok(updateBadge !== undefined, 'the update badge is registered on the plugin detail page')
+assert.equal(updateBadge.options.id, 'dsh-usd-3d-preview/update-badge')
+assert.equal(typeof updateBadge.component, 'function')
+const updateSection = seen.slots.find(slot => slot.options.name === 'plugins.detail.section')
+assert.ok(updateSection !== undefined, 'the update section is registered on the plugin detail page')
+assert.equal(updateSection.options.id, 'dsh-usd-3d-preview/update-section')
+assert.equal(typeof updateSection.component, 'function')
+
+assert.equal(seen.effects.length, 11, 'every registration is owned by a reversible effect')
 
 process.stdout.write(`register.test.mjs  OK  (${seen.effects.length} effects, ${requested.length} module requests)\n`)

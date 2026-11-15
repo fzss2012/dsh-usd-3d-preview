@@ -24,7 +24,8 @@
  * The service list names only what the halves cannot work without: the preview
  * registry for the workspace path, the sidebar registries for the page tab, and
  * the workspace Remote for referenced layers. The drop path needs no host
- * service at all.
+ * service at all. The update panel rides the shared slot registry and the host
+ * update route, so it adds no service here.
  */
 import { UsdPreviewGlyph } from './artwork.jsx'
 import { UsdDropBody } from './DropBody.jsx'
@@ -33,6 +34,8 @@ import { UsdBody } from './UsdBody.jsx'
 import { UsdObjectStoreBody } from './ObjStoreBody.jsx'
 import { en, zh } from './locales.js'
 import { offerDropped } from './dropped.js'
+import { UsdUpdateBadge, UsdUpdateSection, UsdUpdateSettingsTab } from './UpdatePanel.jsx'
+import { UPDATE_DETAIL_BADGE_ID, UPDATE_DETAIL_SECTION_ID, UPDATE_SETTINGS_TAB_ID } from './update.js'
 import {
   parseFileReference,
   siblingPath,
@@ -224,6 +227,30 @@ export function apply(ctx) {
     locale: NS,
     inject: () => ({ openDroppedStage }),
   }, UsdObjectStoreBody)), 'usd-3d-preview: object storage tab body')
+  // ── local checkout update: Settings → Plugins tab, and this bundle's page ──
+  // Both surfaces read the same host status and post the same explicit actions;
+  // the terminal equivalent is "npm run update:local".
+  ctx.effect(() => ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: UPDATE_SETTINGS_TAB_ID,
+    order: 40,
+    label: () => t('updateTab'),
+    locale: NS,
+  }, UsdUpdateSettingsTab)), 'usd-3d-preview: update settings tab')
+
+  ctx.effect(() => ctx.slots.inject('plugins.detail.badge', () => ctx.slots.register({
+    name: 'plugins.detail.badge',
+    id: UPDATE_DETAIL_BADGE_ID,
+    order: 40,
+    locale: NS,
+  }, UsdUpdateBadge)), 'usd-3d-preview: update detail badge')
+
+  ctx.effect(() => ctx.slots.inject('plugins.detail.section', () => ctx.slots.register({
+    name: 'plugins.detail.section',
+    id: UPDATE_DETAIL_SECTION_ID,
+    order: 40,
+    locale: NS,
+  }, UsdUpdateSection)), 'usd-3d-preview: update detail section')
 }
 
 export { parseFileReference, siblingPath }
