@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { UsdPreviewGlyph } from './artwork.jsx'
 import { collectDropped, defaultStage, subscribeDropped, takePendingDropped } from './dropped.js'
-import { openStage, readS3Asset } from './s3open.js'
+import { openStage } from './s3open.js'
 import { UsdBody } from './UsdBody.jsx'
 
 const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
@@ -169,9 +169,9 @@ export function UsdDropBody(props) {
     directoryInput.current?.setAttribute('directory', '')
   }, [])
 
-  // Direct s3:// opening: the page reads the object bytes through the host
-  // signing route (or the workstation gateway) and reuses the dropped-stage
-  // shape, so the rest of this component needs no second code path.
+  // Opening by address: the page reads the root layer and hands the engine the
+  // readers for every reference the stage names, so relative layers, sublayers
+  // and s3:// payloads resolve exactly as they do for a dropped folder.
   const openUri = useCallback(async () => {
     const value = uri.trim()
     if (value.length === 0 || uriBusy) return
@@ -179,8 +179,8 @@ export function UsdDropBody(props) {
     setUriError(null)
     try {
       const result = await openStage(value)
-      setDrop({ files: result.files, stages: result.stages })
-      setChosen(result.rootKey)
+      setDrop({ remoteStage: result, stages: [result.label] })
+      setChosen(result.label)
     } catch (error) {
       setUriError(typeof error?.message === 'string' ? error.message : String(error))
     } finally {
@@ -249,13 +249,12 @@ export function UsdDropBody(props) {
     ? null
     : (uriError === 's3-bad-uri' ? label('s3BadUri', 'Bad s3:// URI')
       : uriError === 's3-not-found' ? label('s3NotFound', 'Object not found')
-      : uriError === 's3-gateway-down' || uriError === 's3-network' ? label('s3Network', 'Read failed: host route and local gateway unavailable')
+      : uriError === 's3-gateway-down' ? label('s3NotConfigured', 'The host has no asset library configured and the local gateway is down')
       : uriError === 's3-read-failed' ? label('s3ReadFailed', 'Read failed: object storage error')
-      : uriError === 'http-bad-uri' ? label('httpBadUri', 'Bad http(s) USD URL')
       : uriError === 'http-not-found' ? label('httpNotFound', 'HTTP 404: object not found')
       : uriError === 'http-fetch-failed' ? label('httpFetchFailed', 'HTTP read failed')
       : uriError === 'stage-bad-uri' ? label('stageBadUri', 'Unrecognized address')
-      : label('s3NotConfigured', 'No asset library configured'))
+      : label('openUriFailed', 'Could not open the address') + ': ' + uriError)
 
   const empty = drop === undefined || activeRoot === undefined
 
@@ -289,7 +288,7 @@ export function UsdDropBody(props) {
                   spellCheck={false}
                   onChange={event => setUri(event.target.value)}
                   onKeyDown={event => { if (event.key === 'Enter') void openUri() }}
-                  placeholder="s3://asset/.../mesh.usda  或  https://<asset-host>/usd-asset/..."
+                  placeholder="s3://bucket/path/stage.usda or https://host/path/stage.usda"
                   style={S3_INPUT}
                   aria-label={label('openUri', 'Open URI')}
                 />
@@ -302,7 +301,9 @@ export function UsdDropBody(props) {
             </div>
           </div>
         ) : (
-          <UsdBody t={t} droppedFiles={drop.files} droppedRootKey={activeRoot} readAsset={readS3Asset} />
+          drop.remoteStage !== undefined
+            ? <UsdBody t={t} remoteStage={drop.remoteStage} />
+            : <UsdBody t={t} droppedFiles={drop.files} droppedRootKey={activeRoot} />
         )}
       </div>
       <input

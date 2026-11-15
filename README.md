@@ -28,7 +28,7 @@ dsh-usd-3d-preview
 ├─ lib/client.js           browser half (classic-CJS module-table entry; three, the WASM engine,
 │                          articulation/kinematics and the studio view are inlined)
 ├─ src/                    the only source of truth: host/ + client/
-├─ tests/                  nine suites (including real Chromium pixel tests) + fixtures
+├─ tests/                  ten suites (including real Chromium pixel tests) + fixtures
 └─ cordis.patch.yml        bundle patch layer: one `ui-usd-3d-preview` entry
 ```
 
@@ -259,7 +259,8 @@ self-contained.
 
 Bytes stay in the page: no upload, no workspace write, no host route. The panel header names the
 opened layer and *Open another asset* goes back to the zone. The only thing the browser needs is
-the bundle — the same WASM engine composes the dropped stage.
+the bundle — the same WASM engine composes the dropped stage. (A pasted address is different: it
+does read through the read-only routes below.)
 
 ### Opening a stage by address
 
@@ -268,11 +269,16 @@ object storage or behind an HTTP endpoint needs no download step:
 
 | Address | How it is read |
 |---|---|
-| `s3://bucket/key.usda` | through the host signing route (`/api/usd-preview/asset`); when the host half has no `DSH_USD_S3_*` configured, a loopback gateway that fronts the same bucket is used instead |
-| `https://host/path.usda` | the page fetches it directly — same-origin needs nothing, cross-origin needs `Access-Control-Allow-Origin` |
+| `s3://bucket/key.usda` | root layer through the host signing route (`/api/usd-preview/asset`); when the host half has no `DSH_USD_S3_*` configured, a loopback gateway that fronts the same bucket is used instead |
+| `https://host/path.usda` | the root layer is fetched directly — same-origin needs nothing, cross-origin needs `Access-Control-Allow-Origin` |
 
-The bytes are held by the page exactly like a dropped file, so internal `s3://` references in the
-stage are still resolved through the same reader and composition takes the drop path unchanged.
+The root bytes are held by the page exactly like a dropped file, but the stage is composed through
+the engine's multi-pass loader instead of the drop map: every reference the stage names is read on
+demand with the pasted address as its base, and the stage is recomposed until nothing is missing.
+Relative layers, sublayers and absolute `s3://` references therefore resolve; an unreadable layer
+stays a warning rather than a failed preview. HTTP-referenced layers need the same CORS permission
+as the root, and an `s3://` layer inside an address-opened stage uses the same signing route as
+the root.
 
 ### Object storage browser
 
@@ -284,37 +290,59 @@ read-only listing API and offers:
 - a lazy directory tree with breadcrumbs, per-folder filtering and refresh;
 - **recursive search** of the current prefix — USD-only by default (`.usd/.usda/.usdc/.usdz`), with
   an *All files* toggle, debounced, showing each match's folder, size and time;
-- per row: **Preview** (hands the bytes to the USD preview tab through the same pending-drop
-  channel the sidebar drag uses), copy `s3://` URI, copy https URL, open in browser.
+- per row: **Preview** (hands the object to the USD preview tab through the same pending-drop
+  channel the sidebar drag uses; referenced layers are then read through the readers below),
+  copy `s3://` URI, copy https URL, open in browser.
 
-Both routes are read-only and GET-only:
+The listing API is **deployment-provided**: this repository ships the page, not the gateway that
+terminates the routes. The page calls them on its own origin by default:
 
-| Route | Meaning |
+| Page route | Meaning |
 |---|---|
-| `GET /api/list?prefix=` | immediate children of one prefix |
-| `GET /api/search?prefix=&q=&usd=1&limit=200` | recursive file search below one prefix |
-| `GET /api/stat?key=` | one object's metadata |
-| `GET /api/asset?uri=s3://…` | one object's bytes (the signing route above) |
+| `GET /usd-asset-api/list?prefix=` | immediate children of one prefix |
+| `GET /usd-asset-api/search?prefix=&q=&usd=1&limit=200` | recursive file search below one prefix |
+| `GET /usd-asset/<key>` | one object's bytes (Preview's root read and the relative-reference reader) |
 
-The client calls these routes on the page's own origin, so the panel works wherever the shell is
-served from as long as the routes are reachable there. A deployment that terminates them elsewhere
-(a portal host, a local dev port) names that origin once, before the bundle runs:
+All of them are read-only and GET-only. A previewed stage's absolute `s3://` references go through
+the host signing route (`/api/usd-preview/asset`), with the gateway's byte route as fallback. The
+JSON the page expects:
+
+```jsonc
+// GET /usd-asset-api/list
+{ "bucket": "asset", "prefix": "samples/", "allowedPrefixes": ["samples/"],
+  "entries": [{ "key": "samples/window.usda", "name": "window.usda",
+                "type": "file", "size": 130380, "lastModified": "2026-11-01T10:00:00Z" }],
+  "truncated": false }
+// GET /usd-asset-api/search
+{ "entries": [ /* the same entry shape */ ], "scanned": 42, "truncated": false }
+```
+
+`type` is `"folder"` or `"file"`; a folder entry needs `key` and `name`. A deployment that
+terminates the routes elsewhere (a portal host, a local dev port) names that origin once, before the
+bundle runs, and that origin must answer CORS for the page:
 
 ```js
 globalThis.__DSH_OBJSTORE_ASSET_ORIGIN__ = 'https://asset.example.com'
 ```
 
+A stock install has no listing gateway, so the browser's page reports that the object-storage API is
+not reachable until one is deployed; the USD preview itself does not depend on it.
+
 ## Prim paths
 
-The viewport toolbar carries a **Prims · N** button. It opens a panel listing every prim path the
-composed graph carries — `/WindowUnit/Geometry/Frame`, for instance — read from the engine's own
-nodes (each mesh's `name` is its prim path; an instanced batch exposes `userData.paths`). Rows are
-filterable and copy to the clipboard on click.
+The viewport toolbar carries a **Prims · N** button. It opens a panel listing the geometry-bearing
+prim paths the composed graph carries — `/WindowUnit/Geometry/Frame`, for instance — read from the
+engine's own nodes (each mesh's `name` is its prim path; an instanced batch exposes
+`userData.paths`). Rows are filterable and copy to the clipboard on click; a very large list is
+clipped and the clip is stated in the panel.
 
 Clicking the model names the prim under the cursor: the panel shows it as **Picked:**, highlights
 the matching row, and the closed-panel hint carries the same line. Naming a prim needs the vertex
-arrays three's raycaster reads, which the engine frees after upload, so they are kept for stages
-below a triangle budget (2 million) and the engine's release stands above it.
+arrays three's raycaster reads, which the engine frees after upload. They are kept for stages below
+a triangle budget (2 million by default; set `globalThis.__DSH_USD_PICK_TRIANGLE_BUDGET__` before
+the bundle runs to change it), so a stage above the budget keeps the engine's release and its canvas
+clicks do nothing — they do not throw. Retaining the arrays is real memory (roughly 40–100 bytes per
+triangle, so tens to a couple of hundred MB at the ceiling), which is exactly what the budget bounds.
 
 ## Build and install
 
@@ -324,7 +352,7 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # instancer + register + drop + parse + s3 + articulation + studio + articulation-render + render
+npm test               # objstore + instancer + register + drop + parse + s3 + articulation + studio + articulation-render + render
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
 
@@ -372,9 +400,10 @@ the patch layer.
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
 | `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and both `/api/usd-preview/*` routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
+| `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, and that a throwing frame observer stops the loop instead of hot-looping |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
-| `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame and the stats must name the OpenUSD (WASM) engine. Screenshots land in `tests/.artifacts/` |
+| `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame, stay pickable, and the stats must name the OpenUSD (WASM) engine; a prim-panel case checks the path list, its filter and that a canvas click names the picked prim. Screenshots land in `tests/.artifacts/` |
 
 The browser suites need Playwright + Chromium. Without a browser they print `SKIP`, and `npm test`
 fails instead of reporting a false green — set `DSH_ALLOW_BROWSER_SKIP=1` to run the offline suites

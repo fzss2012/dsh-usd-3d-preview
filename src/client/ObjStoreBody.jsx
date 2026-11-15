@@ -17,6 +17,8 @@ import {
   s3Uri,
   searchFiles,
 } from './objstore.js'
+import { dirOf, normalizePath, resolvePath, s3KeyOf } from './remote.js'
+import { readS3Asset } from './s3open.js'
 
 const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
 const LABEL_DIM = 'var(--dsw-alias-label-secondary, #a9b0bd)'
@@ -299,22 +301,78 @@ export function UsdObjectStoreBody(props) {
     void load(nextPrefix)
   }, [load])
 
+  /**
+   * Layer reader for one previewed object: the engine reports a reference
+   * relative to the naming layer, so try it under the object's own directory
+   * first and fall back to the package spelling.
+   * @param rootKey - the root object's key.
+   * @returns a reader answering gateway bytes, or undefined for a missing layer.
+   */
+  const objectReader = useCallback((rootKey) => {
+    const rootDir = dirOf(normalizePath(rootKey))
+    return async (path, signal) => {
+      const normalized = normalizePath(path)
+      const candidates = [resolvePath(rootDir, normalized), normalized]
+      if (rootDir !== '' && normalized.startsWith(rootDir + '/')) {
+        candidates.push(normalized.slice(rootDir.length + 1))
+      }
+      for (const candidate of new Set(candidates)) {
+        try {
+          return await fetchObjectBytes(candidate, signal)
+        } catch (error) {
+          if (error?.name === 'AbortError' || signal?.aborted === true) throw error
+        }
+      }
+      return undefined
+    }
+  }, [])
+
+  /**
+   * Absolute s3:// reader for a previewed object: the host signing route first,
+   * then the gateway's public byte route, because the browser's bucket may not
+   * be the host's configured one.
+   * @param uri - an s3:// reference named by the stage.
+   * @param signal - abort signal.
+   * @returns bytes, or undefined for a missing layer.
+   */
+  const objectAssetReader = useCallback(async (uri, signal) => {
+    const bytes = await readS3Asset(uri, signal)
+    if (bytes !== undefined) return bytes
+    const key = s3KeyOf(uri)
+    if (key === undefined) return undefined
+    try {
+      return await fetchObjectBytes(key, signal)
+    } catch (error) {
+      if (error?.name === 'AbortError' || signal?.aborted === true) throw error
+      return undefined
+    }
+  }, [])
+
   const openUsd = useCallback(async (entry) => {
     if (typeof openDroppedStage !== 'function') return
     setBusyKey(entry.key)
     setError(null)
     try {
-      const bytes = await fetchObjectBytes(entry.key)
+      const rootKey = normalizePath(entry.key)
+      const rootBytes = await fetchObjectBytes(rootKey)
       openDroppedStage({
-        files: new Map([[entry.key, new Blob([bytes], { type: 'application/octet-stream' })]]),
-        stages: [entry.key],
+        remoteStage: {
+          uri: s3Uri(payload.bucket, rootKey),
+          kind: 's3',
+          label: entry.name || rootKey,
+          rootKey,
+          rootBytes,
+          read: objectReader(rootKey),
+          readAsset: objectAssetReader,
+        },
+        stages: [entry.name || rootKey],
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusyKey(null)
     }
-  }, [openDroppedStage])
+  }, [openDroppedStage, objectAssetReader, objectReader, payload.bucket])
 
   const copy = useCallback(async (text, mark) => {
     try {
@@ -345,8 +403,14 @@ export function UsdObjectStoreBody(props) {
           ? label('objstoreClipboard', 'Clipboard is not available in this browser')
           : label('objstoreError', 'Read failed') + ': ' + error)
 
+  // A search and an action can both have failed; neither may be hidden by the
+  // other, so the list shows both lines while a query is active.
+  const activeErrorText = searchErrorText === null
+    ? errorText
+    : (errorText === null ? searchErrorText : searchErrorText + '\n' + errorText)
+
   return (
-    <div style={SHELL}>
+    <div style={SHELL} data-usd-objstore>
       <div style={HEADER}>
         <span style={TITLE} title={'s3://' + payload.bucket + '/' + prefix}>
           {label('objstoreTitle', 'Object storage')} · {payload.bucket}
@@ -407,15 +471,15 @@ export function UsdObjectStoreBody(props) {
         {(searching ? searchBusy : loading)
           ? <div style={{ padding: 8, color: LABEL_DIM }}>{searching ? label('objstoreSearching', 'Searching…') : label('objstoreLoading', 'Reading folder…')}</div>
           : null}
-        {(searching ? searchErrorText : errorText) === null
+        {activeErrorText === null
           ? null
-          : <div style={{ padding: 8, color: ERROR, whiteSpace: 'pre-wrap' }}>{searching ? searchErrorText : errorText}</div>}
-        {!(searching ? searchBusy : loading) && (searching ? searchErrorText : errorText) === null && rows.length === 0
+          : <div style={{ padding: 8, color: ERROR, whiteSpace: 'pre-wrap' }}>{activeErrorText}</div>}
+        {!(searching ? searchBusy : loading) && activeErrorText === null && rows.length === 0
           ? <div style={{ padding: 8, color: LABEL_DIM }}>{searching ? label('objstoreNoMatch', 'No matching files') : label('objstoreEmpty', 'This folder has no visible objects')}</div>
           : null}
 
         {rows.map(entry => (
-          <div key={entry.key} style={ROW}>
+          <div key={entry.key} style={ROW} data-usd-objstore-entry={entry.key}>
             <button
               type="button"
               style={ROW_MAIN}
@@ -451,8 +515,8 @@ export function UsdObjectStoreBody(props) {
                 <button
                   type="button"
                   style={smallButton(false)}
-                  title={s3Uri(entry.key)}
-                  onClick={() => void copy(s3Uri(entry.key), 's3:' + entry.key)}
+                  title={s3Uri(payload.bucket, entry.key)}
+                  onClick={() => void copy(s3Uri(payload.bucket, entry.key), 's3:' + entry.key)}
                 >
                   {copied === 's3:' + entry.key ? '✓' : 's3'}
                 </button>
@@ -482,7 +546,7 @@ export function UsdObjectStoreBody(props) {
         {searching
           ? label('objstoreResults', 'Matches') + ': ' + searchPayload.entries.length
             + ' · ' + label('objstoreScanned', 'scanned') + ' ' + searchPayload.scanned
-            + ' · ' + (usdOnly ? 'USD only' : label('objstoreAllFiles', 'all files'))
+            + ' · ' + (usdOnly ? label('objstoreUsdOnly', 'Only USD files') : label('objstoreAllFiles', 'all files'))
             + (searchPayload.truncated ? ' · ' + label('objstoreTruncated', 'listing truncated; refine the query') : '')
           : label('objstoreAllowed', 'Exposed prefixes') + ': ' + (payload.allowedPrefixes.join(', ') || '—')
             + ' · ' + rows.length + ' / ' + payload.entries.length + ' ' + label('objstoreItems', 'items')

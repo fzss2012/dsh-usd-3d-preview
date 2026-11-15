@@ -125,7 +125,7 @@ assert.equal(hostRoutes.size, 2, 'the host half registered both trust-fenced ass
 /** Files to draw, and the geometry each must report. */
 const CASES = [
   { path: 'sample.usdz', meshes: 2, match: /Layers: 1/, note: 'package' },
-  { path: 'sample.usda', meshes: 2, match: /Container: usda/, note: 'ASCII' },
+  { path: 'sample.usda', meshes: 2, match: /Container: usda/, note: 'ASCII + prims', prims: true },
   { path: 'sample.usdc', meshes: 2, match: /Container: usdc/, note: 'binary crate' },
   // One quad in a second layer: the case where the bytes alone are not enough.
   { path: 'refs/unit.usda', meshes: 1, match: /Layers: 2/, note: 'reference chain' },
@@ -296,7 +296,7 @@ const probe = await createPixelProbe(browser)
 const results = []
 try {
   for (const entry of CASES) {
-    const { path, root: caseRoot, absolute, meshes, parts, partsAtLeast, toggle, colliders, pick, match, note, warnings } = entry
+    const { path, root: caseRoot, absolute, meshes, parts, partsAtLeast, toggle, colliders, pick, prims, match, note, warnings } = entry
     const page = await browser.newPage({ viewport: { width: 900, height: 640 } })
     const consoleErrors = []
     page.on('pageerror', error => consoleErrors.push(error?.stack ?? String(error)))
@@ -317,6 +317,14 @@ try {
     }
     assert.match(stats, match, `${path}: unexpected layer/container report\n${stats}`)
     assert.ok(!/Triangles: 0/.test(stats), `${path}: no triangles were assembled\n${stats}`)
+
+    // A stage under the picking budget keeps its CPU arrays, so the canvas can
+    // name the prim under the cursor; every committed fixture is under it.
+    assert.equal(
+      await page.locator('[data-usd-preview]').getAttribute('data-usd-pickable'),
+      '1',
+      `${path}: a stage under the picking budget must stay pickable`,
+    )
 
     const canvas = page.locator('[data-usd-preview-canvas]')
     const box = await canvas.boundingBox()
@@ -383,6 +391,35 @@ try {
       const after = join(artifacts, `${path.replaceAll('/', '_')}-pick-after.png`)
       await canvas.screenshot({ path: after })
       caseShot.pick = { before, after }
+    }
+    if (prims === true) {
+      // The panel lists the geometry-bearing prim paths, filters them, and a
+      // click on the model names the prim under the cursor. This is the guard
+      // for the pick registration: with no handler a click names nothing, and
+      // with a handler on released arrays the page throws instead.
+      const primsToggle = page.locator('[data-usd-prims-toggle]')
+      const primsText = await primsToggle.innerText()
+      const primCount = Number((/Prims\s*·\s*(\d+)/.exec(primsText) || [])[1])
+      assert.ok(Number.isFinite(primCount) && primCount >= 2, `${path}: expected prim paths, got ${primsText}`)
+      await primsToggle.click()
+      const panel = page.locator('[data-usd-prims]')
+      await panel.waitFor()
+      const rows = panel.locator('button')
+      assert.equal(await rows.count(), primCount, `${path}: the panel lists every collected prim path`)
+      const firstRow = (await rows.nth(0).innerText()).replace('✓', '').trim()
+      assert.ok(firstRow.startsWith('/'), `${path}: a row must be a prim path, got ${firstRow}`)
+      const filter = panel.locator('input')
+      await filter.fill(firstRow.split('/').filter(Boolean).pop())
+      await page.waitForTimeout(250)
+      assert.ok(await rows.count() >= 1, `${path}: the filter must keep a match`)
+      await filter.fill('')
+      await page.waitForTimeout(250)
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+      await page.waitForTimeout(1000)
+      const pickedCount = await page.locator('[data-usd-picked]').count()
+      const picked = pickedCount === 0 ? '' : await page.locator('[data-usd-picked]').first().innerText()
+      assert.match(picked, /\//, `${path}: a canvas click must name the picked prim (got "${picked}")`)
+      caseShot.prims = { count: primCount, picked }
     }
     results.push(caseShot)
     await page.close()

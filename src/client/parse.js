@@ -48,15 +48,26 @@ const FIELD_DEPTH = 4
 
 const textDecoder = new TextDecoder()
 
+/** Default triangle count under which the CPU vertex arrays are retained. */
+const DEFAULT_PICK_TRIANGLE_BUDGET = 2000000
+
 /**
  * Triangle count below which the vertex arrays are kept on the CPU after upload.
  *
  * Picking a prim under the cursor is what makes a prim path inspectable, and
- * three's raycaster can only read arrays the engine has not released. The
- * duplicate is a few megabytes at this budget and unbounded above it, so large
- * stages keep the engine's release and remain unpickable by design.
+ * three's raycaster can only read arrays the engine has not released. Retaining
+ * them duplicates the geometry (position, normal, uv and index: roughly
+ * 40–100 bytes per triangle, so tens to a couple of hundred MB at the ceiling),
+ * so the budget is a setting rather than a fact of the design: a deployment that
+ * does not need picking can lower it before the bundle runs.
+ *
+ *   globalThis.__DSH_USD_PICK_TRIANGLE_BUDGET__ = 250000
  */
-const PICK_TRIANGLE_BUDGET = 2000000
+function pickTriangleBudget() {
+  const override = globalThis.__DSH_USD_PICK_TRIANGLE_BUDGET__
+  if (typeof override === 'number' && Number.isFinite(override) && override >= 0) return override
+  return DEFAULT_PICK_TRIANGLE_BUDGET
+}
 
 /**
  * Whether the buffer starts with one exact byte sequence.
@@ -294,8 +305,10 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
       const result = await loadWithFiles({ files, rootKey, signal })
       const stats = measureObject(result.root)
       // A dropped or object-storage stage is pickable on the same terms as a
-      // workspace one: naming the prim under the cursor needs the vertex arrays.
-      if (stats.triangles <= PICK_TRIANGLE_BUDGET) retainPickableAttributes(result.root)
+      // workspace one: naming the prim under the cursor needs the vertex arrays
+      // the engine releases after upload.
+      const pickable = stats.triangles <= pickTriangleBudget()
+      if (pickable) retainPickableAttributes(result.root)
       return {
         object: result.root,
         engine: 'wasm',
@@ -304,6 +317,7 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         passes: result.passes,
         warnings: result.info.warnings.map(warning => ({ ...warning })),
         stats,
+        pickable,
         dispose: result.dispose,
       }
     } catch (error) {
@@ -318,6 +332,8 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         passes: [],
         warnings: [],
         stats: measureObject(fallback.object),
+        // The three fallback owns its CPU arrays, so its stages stay pickable.
+        pickable: true,
       }
     }
   }
@@ -349,11 +365,9 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
       const stats = measureObject(result.root)
       // Picking is what names the prim under the cursor, and it needs the vertex
       // arrays the engine frees after upload. An articulated stage needs them
-      // anyway; a static one keeps them only while the stage is small enough for
-      // the duplicate to be cheap.
-      if (articulation !== undefined || stats.triangles <= PICK_TRIANGLE_BUDGET) {
-        retainPickableAttributes(result.root)
-      }
+      // anyway; a static one keeps them only while the stage is small enough.
+      const pickable = articulation !== undefined || stats.triangles <= pickTriangleBudget()
+      if (pickable) retainPickableAttributes(result.root)
       return {
         object: result.root,
         engine: 'wasm',
@@ -364,6 +378,7 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         articulationError,
         warnings: result.info.warnings.map(warning => ({ ...warning })),
         stats,
+        pickable,
         // The engine owns textures too, so its own release is the complete one.
         dispose: result.dispose,
       }
@@ -380,6 +395,8 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         passes: [],
         warnings: [],
         stats: measureObject(fallback.object),
+        // The three fallback owns its CPU arrays, so its stages stay pickable.
+        pickable: true,
       }
     }
   }
@@ -393,6 +410,8 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
     passes: [],
     warnings: [],
     stats: measureObject(fallback.object),
+    // The three fallback owns its CPU arrays, so its stages stay pickable.
+    pickable: true,
   }
 }
 

@@ -113,6 +113,9 @@ const PRIMS = {
   fontSize: 11,
 }
 
+/** Rows the prims panel renders at once; a big instancer can name tens of thousands. */
+const PRIM_ROW_LIMIT = 500
+
 const PRIM_HEAD = {
   display: 'flex',
   alignItems: 'center',
@@ -249,10 +252,11 @@ function length(value) {
  * @param props - the document body's standard props, or the dropped-stage pair.
  * @param props.droppedFiles - dropped files keyed by package-relative path.
  * @param props.droppedRootKey - the key of the dropped stage to open.
+ * @param props.remoteStage - an address-opened stage (root bytes + layer readers).
  * @returns the viewport, or the loading/failure state that replaces it.
  */
 export function UsdBody(props) {
-  const { content, resourceAddress, droppedFiles, droppedRootKey } = props
+  const { content, resourceAddress, droppedFiles, droppedRootKey, remoteStage } = props
   const t = props.t
   const data = content !== undefined && content.kind === 'bytes' ? content.data : undefined
   const name = usdFileName(resourceAddress)
@@ -298,7 +302,7 @@ export function UsdBody(props) {
   }, [t])
 
   useEffect(() => {
-    if (data === undefined && droppedFiles === undefined) {
+    if (data === undefined && droppedFiles === undefined && remoteStage === undefined) {
       setParsed(null)
       setFailure(null)
       return undefined
@@ -309,7 +313,38 @@ export function UsdBody(props) {
     setFailure(null)
     // One macrotask, so the status line paints before a large layer blocks the thread.
     const timer = setTimeout(async () => {
+      /** Bind moving parts before the view exists, so the first frame is posed. */
+      const adopt = (result) => {
+        if (result.articulation !== undefined) {
+          try {
+            result.parts = createArticulationController(result.object, result.articulation)
+          } catch (error) {
+            result.articulationError = error instanceof Error ? error.message : String(error)
+          }
+        }
+        return result
+      }
       try {
+        // An address-opened stage keeps its layers remote: the root bytes are
+        // already in the page and the engine calls the readers for every
+        // reference it composes, exactly like a workspace file. Relative layers,
+        // sublayers and absolute s3:// payloads therefore resolve normally.
+        if (remoteStage !== undefined) {
+          const result = await assemble({
+            rootKey: remoteStage.rootKey,
+            rootBytes: remoteStage.rootBytes,
+            read: remoteStage.read,
+            readAsset: remoteStage.readAsset ?? assetReaderRef.current,
+            signal: controller.signal,
+          })
+          if (cancelled) {
+            if (result.dispose !== undefined) result.dispose()
+            else disposeObject(result.object)
+            return
+          }
+          setParsed(adopt(result))
+          return
+        }
         // A dropped stage is opened by bytes: the page holds every file, so the
         // engine composes from the drop's own map and no read is performed.
         if (droppedFiles !== undefined) {
@@ -322,9 +357,6 @@ export function UsdBody(props) {
             rootKey,
             rootBytes: new Uint8Array(await rootBlob.arrayBuffer()),
             files: droppedFiles,
-            // A directly opened s3:// stage keeps its internal s3 references
-            // resolvable: the same read callback the workspace path uses.
-            readAsset: assetReaderRef.current,
             signal: controller.signal,
           })
           if (cancelled) {
@@ -379,18 +411,9 @@ export function UsdBody(props) {
           else disposeObject(result.object)
           return
         }
-        // Bound before the view exists, so the first frame already shows the
-        // bodies in their rest pose instead of re-parenting them a frame later.
         // A stage that declares parts but cannot be bound still previews: the
-        // geometry is the file, the articulation is an extra.
-        if (result.articulation !== undefined) {
-          try {
-            result.parts = createArticulationController(result.object, result.articulation)
-          } catch (error) {
-            result.articulationError = error instanceof Error ? error.message : String(error)
-          }
-        }
-        setParsed(result)
+        // geometry is the file, the articulation is an extra (see adopt()).
+        setParsed(adopt(result))
       } catch (error) {
         if (cancelled) return
         setFailure(error instanceof Error ? error.message : String(error))
@@ -401,7 +424,7 @@ export function UsdBody(props) {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [data, resourceAddress, droppedFiles, droppedRootKey])
+  }, [data, resourceAddress, droppedFiles, droppedRootKey, remoteStage])
 
   useEffect(() => {
     const container = containerRef.current
@@ -426,18 +449,22 @@ export function UsdBody(props) {
       ? undefined
       : view.onFrame(deltaMs => parts.tick(deltaMs) === true)
     // Picking serves two purposes: an articulated stage opens the clicked part,
-    // a static one names it. Both are the same click.
-    const stopPick = view.onPick((hits) => {
-      if (parts !== undefined && parts.pick(hits) === true) view.requestRender()
-      const hit = hits[0]
-      const object = hit?.object
-      const name = object === undefined
-        ? undefined
-        : (object.isInstancedMesh === true && Array.isArray(object.userData?.paths)
-          ? object.userData.paths[hit.instanceId]
-          : object.name)
-      setPicked(typeof name === 'string' && name.startsWith('/') ? name : null)
-    })
+    // a static one names it. Both are the same click. A stage above the picking
+    // budget kept the engine's post-upload release, so its vertex arrays are
+    // gone and three's raycaster would throw on them: no handler, no click.
+    const stopPick = parsed.pickable === true
+      ? view.onPick((hits) => {
+        if (parts !== undefined && parts.pick(hits) === true) view.requestRender()
+        const hit = hits[0]
+        const object = hit?.object
+        const name = object === undefined
+          ? undefined
+          : (object.isInstancedMesh === true && Array.isArray(object.userData?.paths)
+            ? object.userData.paths[hit.instanceId]
+            : object.name)
+        setPicked(typeof name === 'string' && name.startsWith('/') ? name : null)
+      })
+      : undefined
     return () => {
       stopFrame?.()
       stopPick?.()
@@ -480,6 +507,7 @@ export function UsdBody(props) {
     if (needle === '') return primPaths
     return primPaths.filter(path => path.toLowerCase().includes(needle))
   }, [primFilter, primPaths])
+  const visiblePrims = shownPrims.slice(0, PRIM_ROW_LIMIT)
 
   const copyPath = useCallback(async (path) => {
     try {
@@ -551,6 +579,7 @@ export function UsdBody(props) {
       data-usd-engine-error={parsed?.engineError ?? ''}
       data-usd-parts={parts === undefined ? 0 : parts.movingParts}
       data-usd-colliders={parts?.hasColliders === true ? '1' : '0'}
+      data-usd-pickable={parsed?.pickable === true ? '1' : '0'}
     >
       <div ref={containerRef} style={CANVAS} data-usd-preview-stage />
       {failure !== null && (
@@ -677,7 +706,7 @@ export function UsdBody(props) {
               <div style={PRIM_LIST}>
                 {shownPrims.length === 0
                   ? <div style={{ padding: '2px 6px', color: LABEL_DIM }}>{label('primsEmpty', 'No prim paths in this stage')}</div>
-                  : shownPrims.map(path => (
+                  : visiblePrims.map(path => (
                     <button
                       key={path}
                       type="button"
@@ -688,6 +717,11 @@ export function UsdBody(props) {
                       {copiedPath === path ? '✓ ' : ''}{path}
                     </button>
                   ))}
+                {shownPrims.length > PRIM_ROW_LIMIT && (
+                  <div style={{ padding: '2px 6px', color: LABEL_DIM }}>
+                    {label('primsLimited', 'list clipped to the first')} {PRIM_ROW_LIMIT} / {shownPrims.length}
+                  </div>
+                )}
               </div>
             </div>
           )}

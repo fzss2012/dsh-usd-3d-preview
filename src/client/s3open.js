@@ -1,14 +1,16 @@
 /**
- * Direct s3:// opening for the external-asset tab.
+ * Opening a stage directly from an address: s3:// through the host signing route
+ * (with a loopback gateway fallback) and http(s) by direct fetch.
  *
- * The previewer's object-storage support was reference-only: a stage could name
- * s3://bucket/key layers, but there was no way to open such a URI itself.
- * This module closes that gap through the same host signing route the reference
- * path uses (/api/usd-preview/asset), so no S3 credential ever reaches the page.
- * When the host has no asset library configured (the DSH_USD_S3_* variables are
- * absent), a local read-only gateway on 127.0.0.1:9010 is used instead.
+ * The page holds only the root layer's bytes; every other layer is read on
+ * demand, so the returned descriptor carries the readers the engine calls while
+ * it localizes references. The engine composes the stage through its own
+ * multi-pass loader (the same one a workspace file uses), so relative layers,
+ * sublayers and absolute s3:// references all resolve -- one layer read per
+ * reference, and a missing layer stays a warning rather than a failed preview.
  */
 import { USD_EXTENSIONS } from './usd.js'
+import { baseName, dirOf, normalizePath, resolvePath } from './remote.js'
 
 /** One canonical s3://bucket/key address. */
 const S3_URI = /^s3:\/\/([^/]+)\/(.+)$/
@@ -69,10 +71,16 @@ function parseHttp(uri) {
   } catch {
     return undefined
   }
-  const path = decodeURIComponent(url.pathname)
+  let path
+  try {
+    path = decodeURIComponent(url.pathname)
+  } catch {
+    // A malformed percent escape is not a stage address; report it as such.
+    return undefined
+  }
   const dot = path.lastIndexOf('.')
   if (dot < 0 || !USD_SUFFIXES.has(path.slice(dot + 1).toLowerCase())) return undefined
-  return { uri: text, key: path.replace(/^\/+/, '') }
+  return { uri: text, key: normalizePath(path) }
 }
 
 /** Split a URI into its bucket and key, or undefined when it is not s3://. */
@@ -100,8 +108,8 @@ async function readObject(parsed, signal) {
     if (host !== undefined && host.status === 404) throw new Error('s3-not-found')
     if (host !== undefined && host.status !== 503) throw new Error('s3-read-failed')
   }
-  // 503: the host route exists but no asset library is configured.
-  const keyPath = parsed.key.split('/').map(segment => encodeURIComponent(segment)).join('/')
+  // 503 (or no library at all): read the same bucket through the workstation gateway.
+  const keyPath = normalizePath(parsed.key).split('/').map(segment => encodeURIComponent(segment)).join('/')
   const local = await fetch(GATEWAY + '/asset/' + keyPath, { signal }).catch(() => undefined)
   if (local === undefined) throw new Error('s3-gateway-down')
   if (local.status === 404) throw new Error('s3-not-found')
@@ -110,36 +118,139 @@ async function readObject(parsed, signal) {
 }
 
 /**
- * Read one s3:// reference for the WASM engine's localization pass.
- * @param uri - the reference named by a layer.
+ * Read one object for the engine's localization pass; a failure is "missing
+ * layer" so the engine keeps composing and reports it.
+ * @param uri - an s3:// URI.
  * @param signal - abort signal.
- * @returns bytes, or undefined when the read failed (the engine reports it).
+ * @returns bytes, or undefined when the object cannot be read.
  */
-/** Whether an absolute http(s) URL names a USD stage. */
-export function isUsdHttpUri(uri) {
-  return parseHttp(uri) !== undefined
+export async function readS3Asset(uri, signal) {
+  const parsed = parse(uri)
+  if (parsed === undefined) return undefined
+  try {
+    return await readObject(parsed, signal)
+  } catch (error) {
+    // An aborted read is not a missing layer; the tab is going away.
+    if (error?.name === 'AbortError' || signal?.aborted === true) throw error
+    return undefined
+  }
 }
 
 /**
- * Open an absolute http(s) URL as the root stage.
+ * Reader the engine calls for a layer path it resolved against an s3 root.
  *
- * The URL must be CORS-readable from the page (the asset-library nginx adds
- * Access-Control-Allow-Origin: *). Same-origin URLs need no CORS at all.
+ * The engine reports a reference relative to the naming layer's directory; the
+ * candidates cover the spellings it may produce (with and without the root
+ * directory prefix) so one read is enough whichever way the reference was
+ * written.
+ * @param bucket - bucket of the opened stage.
+ * @param rootDir - directory part of the opened stage's key.
+ * @returns a reader answering object bytes, or undefined for a missing layer.
+ */
+function s3LayerReader(bucket, rootDir) {
+  return async (path, signal) => {
+    const text = String(path ?? '')
+    if (S3_URI.test(text)) return await readS3Asset(text, signal)
+    const normalized = normalizePath(text)
+    const candidates = []
+    if (normalized.startsWith(`${bucket}/`)) candidates.push(`s3://${normalized}`)
+    candidates.push(`s3://${bucket}/${normalized}`)
+    if (rootDir !== '') candidates.push(`s3://${bucket}/${resolvePath(rootDir, normalized)}`)
+    for (const candidate of new Set(candidates)) {
+      const bytes = await readS3Asset(candidate, signal)
+      if (bytes !== undefined) return bytes
+    }
+    return undefined
+  }
+}
+
+/**
+ * Reader the engine calls for a layer path it resolved against an http(s) root.
+ *
+ * The reference may be an absolute URL, or a path relative to the root layer's
+ * directory; both are fetched directly. Cross-origin layers need the server to
+ * allow the page's origin, the same requirement as opening the root.
+ * @param rootUri - the opened stage's absolute URL.
+ * @returns a reader answering layer bytes, or undefined for a missing layer.
+ */
+function httpLayerReader(rootUri) {
+  const rootUrl = new URL(rootUri)
+  const baseUrl = new URL('.', rootUrl)
+  const rootDir = dirOf(normalizePath(rootUrl.pathname))
+  return async (path, signal) => {
+    const text = String(path ?? '')
+    const candidates = []
+    if (HTTP_URI.test(text)) {
+      candidates.push(text)
+    } else {
+      const normalized = normalizePath(text)
+      if (rootDir !== '' && normalized.startsWith(`${rootDir}/`)) {
+        candidates.push(new URL(normalized.slice(rootDir.length + 1), baseUrl).href)
+      }
+      candidates.push(new URL(normalized, baseUrl).href)
+    }
+    for (const candidate of new Set(candidates)) {
+      try {
+        const response = await fetch(candidate, { signal, mode: 'cors' })
+        if (response.ok) return new Uint8Array(await response.arrayBuffer())
+        if (response.status !== 404) continue
+      } catch (error) {
+        if (error?.name === 'AbortError' || signal?.aborted === true) throw error
+        continue
+      }
+    }
+    return undefined
+  }
+}
+
+/**
+ * Open one s3:// URI as the root stage: root bytes plus the readers the engine
+ * uses for the layers it names.
+ * @param uri - s3://bucket/key.usda address to open.
+ * @param signal - abort signal from the owning tab.
+ * @returns the address descriptor: root key/bytes and readers.
+ */
+async function openS3Stage(uri, signal) {
+  const parsed = parse(uri)
+  if (parsed === undefined || !isUsdS3Uri(parsed.uri)) throw new Error('s3-bad-uri')
+  const rootBytes = await readObject(parsed, signal)
+  const rootKey = normalizePath(parsed.key)
+  return {
+    uri: parsed.uri,
+    kind: 's3',
+    label: baseName(rootKey),
+    rootKey,
+    rootBytes,
+    read: s3LayerReader(parsed.bucket, dirOf(rootKey)),
+    readAsset: readS3Asset,
+  }
+}
+
+/**
+ * Open one absolute http(s) URL as the root stage.
+ *
+ * The URL must be CORS-readable from the page (same-origin needs no CORS).
  * @param parsed - http(s) URL from parseHttp().
  * @param signal - abort signal from the owning tab.
- * @returns the engine's dropped-file shape.
+ * @returns the address descriptor: root key/bytes and readers.
  */
 async function openHttpStage(parsed, signal) {
   const response = await fetch(parsed.uri, { signal, mode: 'cors' }).catch(() => undefined)
   if (response === undefined) throw new Error('http-fetch-failed')
   if (response.status === 404) throw new Error('http-not-found')
   if (!response.ok) throw new Error('http-fetch-failed')
-  const bytes = new Uint8Array(await response.arrayBuffer())
+  const rootBytes = new Uint8Array(await response.arrayBuffer())
+  // The root key carries the URL pathname so relative references resolve from
+  // the object's directory; the query string is only part of the root fetch.
+  const rootKey = normalizePath(new URL(parsed.uri).pathname)
   return {
     uri: parsed.uri,
-    rootKey: parsed.key,
-    files: new Map([[parsed.key, new Blob([bytes], { type: 'application/octet-stream' })]]),
-    stages: [parsed.key],
+    kind: 'http',
+    label: baseName(rootKey),
+    rootKey,
+    rootBytes,
+    read: httpLayerReader(parsed.uri),
+    readAsset: readS3Asset,
   }
 }
 
@@ -147,7 +258,7 @@ async function openHttpStage(parsed, signal) {
  * Open either an s3:// URI or an absolute http(s) URL as the root stage.
  * @param uri - stage address the user pasted.
  * @param signal - abort signal from the owning tab.
- * @returns the engine's dropped-file shape.
+ * @returns the address descriptor: root bytes plus the layer readers.
  */
 export async function openStage(uri, signal) {
   const text = String(uri ?? '').trim()
@@ -155,37 +266,4 @@ export async function openStage(uri, signal) {
   const http = parseHttp(text)
   if (http !== undefined) return await openHttpStage(http, signal)
   throw new Error('stage-bad-uri')
-}
-
-export async function readS3Asset(uri, signal) {
-  const parsed = parse(uri)
-  if (parsed === undefined) return undefined
-  try {
-    return await readObject(parsed, signal)
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Open an s3:// URI as the root stage of the external-asset tab.
- *
- * The bytes are held by the page exactly like a dropped file, so the caller
- * reuses UsdBody without a second code path; internal s3:// references are
- * still resolved through readS3Asset.
- * @param uri - s3://bucket/key.usda address to open.
- * @param signal - abort signal from the owning tab.
- * @returns the engine's dropped-file shape: files, stages and the root key.
- */
-export async function openS3Stage(uri, signal) {
-  const parsed = parse(uri)
-  if (parsed === undefined || !isUsdS3Uri(parsed.uri)) throw new Error('s3-bad-uri')
-  const bytes = await readObject(parsed, signal)
-  const rootKey = parsed.key
-  return {
-    uri: parsed.uri,
-    rootKey,
-    files: new Map([[rootKey, new Blob([bytes], { type: 'application/octet-stream' })]]),
-    stages: [rootKey],
-  }
 }
