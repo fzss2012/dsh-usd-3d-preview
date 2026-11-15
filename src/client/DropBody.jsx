@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { UsdPreviewGlyph } from './artwork.jsx'
 import { collectDropped, defaultStage, subscribeDropped, takePendingDropped } from './dropped.js'
+import { openStage, readS3Asset } from './s3open.js'
 import { UsdBody } from './UsdBody.jsx'
 
 const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
@@ -86,6 +87,25 @@ const ZONE = {
 const ZONE_TITLE = { fontSize: 14, fontWeight: 600, color: LABEL }
 const ZONE_TEXT = { lineHeight: 1.7, color: LABEL_DIM }
 const ZONE_ACTIONS = { display: 'flex', gap: 8, marginTop: 2 }
+const S3_ROW = {
+  display: 'flex',
+  gap: 6,
+  width: '100%',
+  marginTop: 4,
+}
+
+const S3_INPUT = {
+  flex: '1 1 auto',
+  minWidth: 0,
+  padding: '4px 8px',
+  borderRadius: 6,
+  border: '1px solid ' + BORDER,
+  background: 'var(--dsw-alias-bg-base, #14161a)',
+  color: LABEL,
+  font: 'inherit',
+  fontSize: 11,
+}
+
 const PICKER = { display: 'flex', flexDirection: 'column', gap: 6, width: '100%', marginTop: 4, maxHeight: 240, overflow: 'auto' }
 
 /**
@@ -121,6 +141,9 @@ export function UsdDropBody(props) {
   const t = props.t
   const [drop, setDrop] = useState(() => takePendingDropped())
   const [chosen, setChosen] = useState(undefined)
+  const [uri, setUri] = useState('')
+  const [uriBusy, setUriBusy] = useState(false)
+  const [uriError, setUriError] = useState(null)
   const fileInput = useRef(null)
   const directoryInput = useRef(null)
 
@@ -145,6 +168,25 @@ export function UsdDropBody(props) {
     directoryInput.current?.setAttribute('webkitdirectory', '')
     directoryInput.current?.setAttribute('directory', '')
   }, [])
+
+  // Direct s3:// opening: the page reads the object bytes through the host
+  // signing route (or the workstation gateway) and reuses the dropped-stage
+  // shape, so the rest of this component needs no second code path.
+  const openUri = useCallback(async () => {
+    const value = uri.trim()
+    if (value.length === 0 || uriBusy) return
+    setUriBusy(true)
+    setUriError(null)
+    try {
+      const result = await openStage(value)
+      setDrop({ files: result.files, stages: result.stages })
+      setChosen(result.rootKey)
+    } catch (error) {
+      setUriError(typeof error?.message === 'string' ? error.message : String(error))
+    } finally {
+      setUriBusy(false)
+    }
+  }, [uri, uriBusy])
 
   const adopt = useCallback((collected) => {
     setDrop(collected)
@@ -203,6 +245,18 @@ export function UsdDropBody(props) {
   }
 
   // A drop that carried no stage at all (a folder of images, a mixed selection).
+  const uriErrorText = uriError === null
+    ? null
+    : (uriError === 's3-bad-uri' ? label('s3BadUri', 'Bad s3:// URI')
+      : uriError === 's3-not-found' ? label('s3NotFound', 'Object not found')
+      : uriError === 's3-gateway-down' || uriError === 's3-network' ? label('s3Network', 'Read failed: host route and local gateway unavailable')
+      : uriError === 's3-read-failed' ? label('s3ReadFailed', 'Read failed: object storage error')
+      : uriError === 'http-bad-uri' ? label('httpBadUri', 'Bad http(s) USD URL')
+      : uriError === 'http-not-found' ? label('httpNotFound', 'HTTP 404: object not found')
+      : uriError === 'http-fetch-failed' ? label('httpFetchFailed', 'HTTP read failed')
+      : uriError === 'stage-bad-uri' ? label('stageBadUri', 'Unrecognized address')
+      : label('s3NotConfigured', 'No asset library configured'))
+
   const empty = drop === undefined || activeRoot === undefined
 
   return (
@@ -227,11 +281,28 @@ export function UsdDropBody(props) {
                   {label('pickFolder', 'Choose folder')}
                 </button>
               </div>
+              <span style={{ ...ZONE_TEXT, fontSize: 11 }}>{label('s3Hint', 'Direct s3:// URI')}</span>
+              <div style={S3_ROW}>
+                <input
+                  type="text"
+                  value={uri}
+                  spellCheck={false}
+                  onChange={event => setUri(event.target.value)}
+                  onKeyDown={event => { if (event.key === 'Enter') void openUri() }}
+                  placeholder="s3://asset/.../mesh.usda  或  https://<asset-host>/usd-asset/..."
+                  style={S3_INPUT}
+                  aria-label={label('openUri', 'Open URI')}
+                />
+                <button type="button" style={buttonStyle(true)} disabled={uriBusy} onClick={() => void openUri()}>
+                  {uriBusy ? label('openUriBusy', 'Reading…') : label('openUri', 'Open URI')}
+                </button>
+              </div>
+              {uriErrorText === null ? null : <span style={{ color: ERROR, lineHeight: 1.5, maxWidth: 420 }}>{uriErrorText}</span>}
               <span style={{ color: LABEL_DIM }}>{label('dropLocal', 'Read in this browser only — nothing is uploaded.')}</span>
             </div>
           </div>
         ) : (
-          <UsdBody t={t} droppedFiles={drop.files} droppedRootKey={activeRoot} />
+          <UsdBody t={t} droppedFiles={drop.files} droppedRootKey={activeRoot} readAsset={readS3Asset} />
         )}
       </div>
       <input

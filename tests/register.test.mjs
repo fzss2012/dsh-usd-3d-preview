@@ -184,8 +184,12 @@ assert.equal(definition.title(), 'USD 三维预览')
 // for a crate; the definition must say so itself.
 assert.equal(typeof definition.title, 'function')
 
-assert.deepEqual(seen.injects, ['sidebar.right.tab.document', 'sidebar.right.pane.tab'])
-assert.equal(seen.slots.length, 2, 'the document body and the sidebar page body are registered once each')
+assert.deepEqual(seen.injects, [
+  'sidebar.right.tab.document',
+  'sidebar.right.pane.tab',
+  'sidebar.right.pane.tab',
+])
+assert.equal(seen.slots.length, 3, 'the document body and both sidebar page bodies are registered once each')
 const [body] = seen.slots
 assert.equal(body.options.name, 'sidebar.right.tab.document')
 assert.equal(body.options.key, definition.id, 'the body key must equal the definition id')
@@ -235,8 +239,8 @@ for (const value of Object.values(dictionary.dictionaries.en)) {
 
 // The external-asset entry point: a page tab type with a guide card, a body for
 // that tab, and the drop watcher that opens it from a drag over the sidebar.
-assert.equal(seen.types.length, 1, 'exactly one sidebar tab type is registered')
-const [type] = seen.types
+assert.equal(seen.types.length, 2, 'the USD preview and the object-storage page types are registered')
+const [type, objType] = seen.types
 assert.equal(type.id, 'dsh-usd-3d-preview/panel')
 assert.equal(type.kind, 'usd-3d-preview')
 assert.equal(type.priority, 'extension', 'an outside type must not lose the kind to a product type')
@@ -249,12 +253,35 @@ assert.equal(typeof type.guide[0].description, 'function')
 assert.equal(typeof type.guide[0].icon, 'function', 'the guide entry carries its own artwork')
 assert.equal(typeof type.guide[0].order, 'number')
 
-const pageBody = seen.slots.find(slot => slot.options.name === 'sidebar.right.pane.tab')
+const pageBodies = seen.slots.filter(slot => slot.options.name === 'sidebar.right.pane.tab')
+assert.equal(pageBodies.length, 2, 'each page type owns one sidebar page body')
+const pageBody = pageBodies.find(slot => slot.options.key === type.id)
 assert.ok(pageBody !== undefined, 'the sidebar page body is not registered')
 assert.equal(pageBody.options.key, type.id, 'the tab body key must equal the type id')
 assert.equal(pageBody.options.locale, 'usd3dPreview')
 assert.equal(typeof pageBody.component, 'function')
 
-assert.equal(seen.effects.length, 6, 'every registration is owned by a reversible effect')
+// The object-storage browser: its own page type and body, ordered before the
+// preview so a stage can be found and opened in one place.
+assert.equal(objType.id, 'dsh-usd-3d-preview/objstore')
+assert.equal(objType.kind, 'usd-objstore')
+assert.equal(objType.priority, 'extension', 'the browser must not lose its kind to a product type')
+assert.equal(objType.patterns, undefined, 'a page type recognizes no resource address')
+assert.equal(typeof objType.title, 'function')
+assert.equal(objType.guide.length, 1)
+assert.equal(typeof objType.guide[0].title, 'function')
+assert.equal(typeof objType.guide[0].description, 'function')
+assert.equal(typeof objType.guide[0].order, 'number')
+assert.ok(objType.guide[0].order < type.guide[0].order, 'browsing is offered before previewing')
+
+const objBody = pageBodies.find(slot => slot.options.key === objType.id)
+assert.ok(objBody !== undefined, 'the object-storage page body is not registered')
+assert.equal(objBody.options.locale, 'usd3dPreview')
+assert.equal(typeof objBody.component, 'function')
+assert.equal(typeof objBody.options.inject, 'function', 'the browser injects the USD handoff')
+const handoff = objBody.options.inject()
+assert.equal(typeof handoff.openDroppedStage, 'function', 'the browser needs a way to open a stage it found')
+
+assert.equal(seen.effects.length, 8, 'every registration is owned by a reversible effect')
 
 process.stdout.write(`register.test.mjs  OK  (${seen.effects.length} effects, ${requested.length} module requests)\n`)

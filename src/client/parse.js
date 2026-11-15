@@ -49,6 +49,16 @@ const FIELD_DEPTH = 4
 const textDecoder = new TextDecoder()
 
 /**
+ * Triangle count below which the vertex arrays are kept on the CPU after upload.
+ *
+ * Picking a prim under the cursor is what makes a prim path inspectable, and
+ * three's raycaster can only read arrays the engine has not released. The
+ * duplicate is a few megabytes at this budget and unbounded above it, so large
+ * stages keep the engine's release and remain unpickable by design.
+ */
+const PICK_TRIANGLE_BUDGET = 2000000
+
+/**
  * Whether the buffer starts with one exact byte sequence.
  * @param bytes - complete file bytes.
  * @param magic - expected leading bytes.
@@ -282,6 +292,10 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
     try {
       const { loadWithFiles } = await import('./engine.js')
       const result = await loadWithFiles({ files, rootKey, signal })
+      const stats = measureObject(result.root)
+      // A dropped or object-storage stage is pickable on the same terms as a
+      // workspace one: naming the prim under the cursor needs the vertex arrays.
+      if (stats.triangles <= PICK_TRIANGLE_BUDGET) retainPickableAttributes(result.root)
       return {
         object: result.root,
         engine: 'wasm',
@@ -289,7 +303,7 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         layers: result.info.stats.layers,
         passes: result.passes,
         warnings: result.info.warnings.map(warning => ({ ...warning })),
-        stats: measureObject(result.root),
+        stats,
         dispose: result.dispose,
       }
     } catch (error) {
@@ -332,9 +346,14 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
           articulationError = diagnostics.slice(0, 4).join('; ')
         }
       }
-      // Picking is the only reason to keep any vertex array on the CPU, so the
-      // engine's release stays untouched for every static stage.
-      if (articulation !== undefined) retainPickableAttributes(result.root)
+      const stats = measureObject(result.root)
+      // Picking is what names the prim under the cursor, and it needs the vertex
+      // arrays the engine frees after upload. An articulated stage needs them
+      // anyway; a static one keeps them only while the stage is small enough for
+      // the duplicate to be cheap.
+      if (articulation !== undefined || stats.triangles <= PICK_TRIANGLE_BUDGET) {
+        retainPickableAttributes(result.root)
+      }
       return {
         object: result.root,
         engine: 'wasm',
@@ -344,7 +363,7 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         articulation,
         articulationError,
         warnings: result.info.warnings.map(warning => ({ ...warning })),
-        stats: measureObject(result.root),
+        stats,
         // The engine owns textures too, so its own release is the complete one.
         dispose: result.dispose,
       }

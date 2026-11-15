@@ -261,6 +261,61 @@ Bytes stay in the page: no upload, no workspace write, no host route. The panel 
 opened layer and *Open another asset* goes back to the zone. The only thing the browser needs is
 the bundle — the same WASM engine composes the dropped stage.
 
+### Opening a stage by address
+
+The same page tab accepts a pasted address instead of a drop, so an asset that already lives in
+object storage or behind an HTTP endpoint needs no download step:
+
+| Address | How it is read |
+|---|---|
+| `s3://bucket/key.usda` | through the host signing route (`/api/usd-preview/asset`); when the host half has no `DSH_USD_S3_*` configured, a loopback gateway that fronts the same bucket is used instead |
+| `https://host/path.usda` | the page fetches it directly — same-origin needs nothing, cross-origin needs `Access-Control-Allow-Origin` |
+
+The bytes are held by the page exactly like a dropped file, so internal `s3://` references in the
+stage are still resolved through the same reader and composition takes the drop path unchanged.
+
+### Object storage browser
+
+`lib/client.js` registers a second page tab, `usd-objstore`
+([`src/client/ObjStoreBody.jsx`](src/client/ObjStoreBody.jsx)), whose guide card sits **before** the
+USD preview card: browsing is the source, previewing is where one object ends up. It reads a
+read-only listing API and offers:
+
+- a lazy directory tree with breadcrumbs, per-folder filtering and refresh;
+- **recursive search** of the current prefix — USD-only by default (`.usd/.usda/.usdc/.usdz`), with
+  an *All files* toggle, debounced, showing each match's folder, size and time;
+- per row: **Preview** (hands the bytes to the USD preview tab through the same pending-drop
+  channel the sidebar drag uses), copy `s3://` URI, copy https URL, open in browser.
+
+Both routes are read-only and GET-only:
+
+| Route | Meaning |
+|---|---|
+| `GET /api/list?prefix=` | immediate children of one prefix |
+| `GET /api/search?prefix=&q=&usd=1&limit=200` | recursive file search below one prefix |
+| `GET /api/stat?key=` | one object's metadata |
+| `GET /api/asset?uri=s3://…` | one object's bytes (the signing route above) |
+
+The client calls these routes on the page's own origin, so the panel works wherever the shell is
+served from as long as the routes are reachable there. A deployment that terminates them elsewhere
+(a portal host, a local dev port) names that origin once, before the bundle runs:
+
+```js
+globalThis.__DSH_OBJSTORE_ASSET_ORIGIN__ = 'https://asset.example.com'
+```
+
+## Prim paths
+
+The viewport toolbar carries a **Prims · N** button. It opens a panel listing every prim path the
+composed graph carries — `/WindowUnit/Geometry/Frame`, for instance — read from the engine's own
+nodes (each mesh's `name` is its prim path; an instanced batch exposes `userData.paths`). Rows are
+filterable and copy to the clipboard on click.
+
+Clicking the model names the prim under the cursor: the panel shows it as **Picked:**, highlights
+the matching row, and the closed-panel hint carries the same line. Naming a prim needs the vertex
+arrays three's raycaster reads, which the engine frees after upload, so they are kept for stages
+below a triangle budget (2 million) and the engine's release stands above it.
+
 ## Build and install
 
 Requires **Node ≥ 20** and npm.
