@@ -1,25 +1,32 @@
 /**
- * Host half: the one route the USD preview needs.
+ * Host half: the routes the USD preview needs.
  *
  * Parsing and composition are entirely native — the WebAssembly OpenUSD engine
- * composes the stage in a Web Worker. What the browser cannot do is sign a
- * request to an S3-compatible object-storage service, so this half resolves
- * `s3://…` references on its behalf:
+ * composes the stage in a Web Worker. The host half does the two things the page
+ * cannot do itself:
  *
- *   GET /api/usd-preview/health        whether an asset library is configured
- *   GET /api/usd-preview/asset?uri=…   one referenced object's bytes
+ *   GET  /api/usd-preview/health        whether an asset library is configured
+ *   GET  /api/usd-preview/asset?uri=…   one signed `s3://…` object read
+ *   GET  /api/usd-preview/update        local checkout update status (read-only)
+ *   POST /api/usd-preview/update        { action: "check" | "update" | "restart" }
  *
- * Both are exact Fetch routes on the Connection service, so the browser-trust
+ * All are exact Fetch routes on the Connection service, so the browser-trust
  * fence (Host/Origin) and the session credential authenticate every request
- * before it reaches this handler; only the owner Peer can read them. They are
- * read-only and owned here. Configuration is environment-only (see `s3.js`):
- * nothing is copied a second time, and no infrastructure is modified.
+ * before it reaches a handler; only the owner Peer can call them. The asset
+ * routes are read-only. The update route is different in kind: it fast-forwards
+ * this plugin's own git checkout from its configured upstream and rebuilds it
+ * (see `update.js`) — it refuses a dirty working tree, never resets, and runs
+ * only the fixed git/npm commands that module names. Both are owned here; S3
+ * configuration stays environment-only (see `s3.js`): nothing is copied a
+ * second time, and no infrastructure is modified.
  */
+import { createUpdateService, UpdateError } from './update.js'
 import { AssetTooLargeError, READ_TIMEOUT_MS, defaultAssetCacheDir, readAsset, storageLibrary } from './s3.js'
 
 /** Exact Fetch-route paths on the shared /api channel. */
 const ASSET_PATH = '/api/usd-preview/asset'
 const HEALTH_PATH = '/api/usd-preview/health'
+const UPDATE_PATH = '/api/usd-preview/update'
 
 /** Plugin name shown by the loader. */
 export const name = 'usd-3d-preview'
@@ -57,6 +64,61 @@ export function apply(ctx) {
     if (libraryPromise === undefined) libraryPromise = storageLibrary()
     return libraryPromise
   }
+  /** One update service per host process; it serializes its own updates. */
+  const updates = createUpdateService({})
+
+  /** Map an update failure to the JSON the panel understands. */
+  const updateFailure = (error) => {
+    if (error instanceof UpdateError) {
+      const status = error.code === 'busy' || error.code === 'bad-branch' ? 409 : 200
+      return jsonResponse(status, {
+        ok: false,
+        error: error.code,
+        message: error.message,
+        log: error.log ?? [],
+      })
+    }
+    ctx.logger?.warn?.('[usd-3d-preview] update failed: %s', String(error?.message ?? error))
+    return jsonResponse(500, { ok: false, error: 'update-failed', message: 'update failed' })
+  }
+
+  /** Answer the read-only status route; `?check=1` fetches the upstream first. */
+  const updateStatus = async (request) => {
+    try {
+      const url = new URL(request.url)
+      const result = url.searchParams.get('check') === '1' ? await updates.check() : await updates.status()
+      return jsonResponse(200, result)
+    } catch (error) {
+      return updateFailure(error)
+    }
+  }
+
+  /** Answer one explicit update action; every action is owner-initiated. */
+  const updateAction = async (request) => {
+    let body
+    try {
+      body = await request.json()
+    } catch {
+      return jsonResponse(400, { ok: false, error: 'invalid-json' })
+    }
+    const action = body !== null && typeof body === 'object' ? body.action : undefined
+    if (action !== 'check' && action !== 'update' && action !== 'restart') {
+      return jsonResponse(400, { ok: false, error: 'unknown-action' })
+    }
+    try {
+      if (action === 'check') return jsonResponse(200, await updates.check())
+      if (action === 'update') return jsonResponse(200, await updates.update())
+      // Let this response leave before the service goes away.
+      return jsonResponse(200, await updates.restart({ delayMs: 400 }))
+    } catch (error) {
+      return updateFailure(error)
+    }
+  }
+
+  /** One Fetch route: GET is status, POST is an explicit action. */
+  const updateRoute = async (request) => (
+    request.method === 'POST' ? await updateAction(request) : await updateStatus(request)
+  )
 
   /**
    * Answer the health route: whether a library is configured, never its secrets.
@@ -140,6 +202,15 @@ export function apply(ctx) {
         fetch: health,
       }),
       'usd-3d-preview: asset library health route',
+    )
+    scope.effect(
+      () => scope.connection.fetch.register({
+        path: UPDATE_PATH,
+        methods: ['GET', 'POST'],
+        requestBody: 'buffered',
+        fetch: updateRoute,
+      }),
+      'usd-3d-preview: local checkout update route',
     )
     void library().then(
       (resolved) => {

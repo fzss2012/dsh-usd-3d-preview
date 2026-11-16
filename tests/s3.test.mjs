@@ -227,12 +227,15 @@ async function mountRoute({ tag, home }) {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome
   }
-  assert.equal(routes.size, 2, 'the host half registered two routes')
+  assert.equal(routes.size, 3, 'the host half registered the asset, health and update routes')
   assert.ok(routes.has('/api/usd-preview/asset'), 'the asset route lives on the /api trust-fenced channel')
   assert.ok(routes.has('/api/usd-preview/health'), 'the health route lives on the /api trust-fenced channel')
-  for (const route of routes.values()) {
-    assert.deepEqual(route.methods, ['GET'], 'the host routes are read-only')
-    assert.equal(route.requestBody, 'buffered', 'a GET route buffers no request body')
+  assert.ok(routes.has('/api/usd-preview/update'), 'the update route lives on the /api trust-fenced channel')
+  const updateRoute = routes.get('/api/usd-preview/update')
+  assert.deepEqual(updateRoute.methods, ['GET', 'POST'], 'the update route reads status and takes explicit actions')
+  for (const [path, route] of routes) {
+    if (path !== '/api/usd-preview/update') assert.deepEqual(route.methods, ['GET'], 'the asset routes are read-only')
+    assert.equal(route.requestBody, 'buffered', 'the routes buffer no request body')
     assert.equal(typeof route.fetch, 'function', 'the route is a Fetch handler')
   }
   /** Send one fake Fetch request through a registered route and collect its answer. */
