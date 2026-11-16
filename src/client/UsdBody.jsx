@@ -14,7 +14,7 @@
  * nothing to scroll, and claiming it would suppress the document body's own
  * scrollbar binding.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createArticulationController } from './kinematics.js'
 import { assemble, disposeObject } from './parse.js'
 import { absoluteFilePath, assetUriOf, parseFileReference, siblingPath, usdFileName } from './usd.js'
@@ -44,8 +44,11 @@ const TOOLBAR = {
   top: 8,
   right: 8,
   display: 'flex',
+  flexWrap: 'wrap',
+  justifyContent: 'flex-end',
+  maxWidth: 'calc(100% - 16px)',
   gap: 6,
-  zIndex: 2,
+  zIndex: 5,
 }
 
 const HINT = {
@@ -53,11 +56,15 @@ const HINT = {
   left: 10,
   top: 10,
   zIndex: 2,
+  maxWidth: '38%',
   padding: '2px 6px',
   borderRadius: 6,
   color: LABEL_DIM,
   background: SURFACE,
   pointerEvents: 'none',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 }
 
 const STATS = {
@@ -86,6 +93,95 @@ const NOTICE = {
   textAlign: 'center',
   color: LABEL_DIM,
   pointerEvents: 'none',
+}
+
+const PRIMS = {
+  position: 'absolute',
+  left: 10,
+  top: 40,
+  zIndex: 4,
+  width: 340,
+  maxWidth: 'calc(100% - 20px)',
+  maxHeight: '52%',
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden',
+  borderRadius: 8,
+  border: '1px solid ' + BORDER,
+  background: SURFACE,
+  color: LABEL,
+  fontSize: 11,
+}
+
+/** Rows the prims panel renders at once; a big instancer can name tens of thousands. */
+const PRIM_ROW_LIMIT = 500
+
+const PRIM_HEAD = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '4px 8px',
+  borderBottom: '1px solid ' + BORDER,
+  color: LABEL_DIM,
+}
+
+const PRIM_FILTER = {
+  margin: '6px 8px 4px',
+  padding: '3px 7px',
+  borderRadius: 6,
+  border: '1px solid ' + BORDER,
+  background: 'var(--dsw-alias-bg-base, #14161a)',
+  color: LABEL,
+  font: 'inherit',
+  fontSize: 11,
+}
+
+const PRIM_LIST = { flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: '0 4px 6px' }
+
+const PRIM_PICKED = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  margin: '0 8px 4px',
+  minWidth: 0,
+  fontSize: 11,
+}
+
+const PRIM_MONO = 'var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)'
+
+function primRowStyle(active) {
+  return {
+    display: 'block',
+    width: '100%',
+    padding: '2px 6px',
+    borderRadius: 5,
+    border: 'none',
+    background: active ? 'rgba(77, 141, 255, 0.16)' : 'transparent',
+    color: active ? ACCENT : LABEL,
+    font: 'inherit',
+    fontSize: 11,
+    fontFamily: PRIM_MONO,
+    textAlign: 'left',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    cursor: 'pointer',
+  }
+}
+
+/** Collect every prim path the composed three graph carries. */
+function collectPrimPaths(object) {
+  const paths = new Set()
+  object.traverse((node) => {
+    if (typeof node.name === 'string' && node.name.startsWith('/')) paths.add(node.name)
+    const instanced = node.userData?.paths
+    if (Array.isArray(instanced)) {
+      for (const path of instanced) {
+        if (typeof path === 'string' && path.startsWith('/')) paths.add(path)
+      }
+    }
+  })
+  return [...paths].sort((left, right) => left.localeCompare(right))
 }
 
 const WARNINGS = {
@@ -156,10 +252,11 @@ function length(value) {
  * @param props - the document body's standard props, or the dropped-stage pair.
  * @param props.droppedFiles - dropped files keyed by package-relative path.
  * @param props.droppedRootKey - the key of the dropped stage to open.
+ * @param props.remoteStage - an address-opened stage (root bytes + layer readers).
  * @returns the viewport, or the loading/failure state that replaces it.
  */
 export function UsdBody(props) {
-  const { content, resourceAddress, droppedFiles, droppedRootKey } = props
+  const { content, resourceAddress, droppedFiles, droppedRootKey, remoteStage } = props
   const t = props.t
   const data = content !== undefined && content.kind === 'bytes' ? content.data : undefined
   const name = usdFileName(resourceAddress)
@@ -182,6 +279,12 @@ export function UsdBody(props) {
   // owns the animation, this only decides which word the button shows.
   const [partsOpen, setPartsOpen] = useState(false)
   const [colliders, setColliders] = useState(false)
+  // Prim paths are the asset's addressable structure: the panel lists every one
+  // the composed graph carries, and a click on the model selects its own.
+  const [primsOpen, setPrimsOpen] = useState(false)
+  const [primFilter, setPrimFilter] = useState('')
+  const [picked, setPicked] = useState(null)
+  const [copiedPath, setCopiedPath] = useState(null)
 
   /**
    * Dictionary lookup with a literal fallback: copy must never be the reason a
@@ -199,7 +302,7 @@ export function UsdBody(props) {
   }, [t])
 
   useEffect(() => {
-    if (data === undefined && droppedFiles === undefined) {
+    if (data === undefined && droppedFiles === undefined && remoteStage === undefined) {
       setParsed(null)
       setFailure(null)
       return undefined
@@ -210,7 +313,38 @@ export function UsdBody(props) {
     setFailure(null)
     // One macrotask, so the status line paints before a large layer blocks the thread.
     const timer = setTimeout(async () => {
+      /** Bind moving parts before the view exists, so the first frame is posed. */
+      const adopt = (result) => {
+        if (result.articulation !== undefined) {
+          try {
+            result.parts = createArticulationController(result.object, result.articulation)
+          } catch (error) {
+            result.articulationError = error instanceof Error ? error.message : String(error)
+          }
+        }
+        return result
+      }
       try {
+        // An address-opened stage keeps its layers remote: the root bytes are
+        // already in the page and the engine calls the readers for every
+        // reference it composes, exactly like a workspace file. Relative layers,
+        // sublayers and absolute s3:// payloads therefore resolve normally.
+        if (remoteStage !== undefined) {
+          const result = await assemble({
+            rootKey: remoteStage.rootKey,
+            rootBytes: remoteStage.rootBytes,
+            read: remoteStage.read,
+            readAsset: remoteStage.readAsset ?? assetReaderRef.current,
+            signal: controller.signal,
+          })
+          if (cancelled) {
+            if (result.dispose !== undefined) result.dispose()
+            else disposeObject(result.object)
+            return
+          }
+          setParsed(adopt(result))
+          return
+        }
         // A dropped stage is opened by bytes: the page holds every file, so the
         // engine composes from the drop's own map and no read is performed.
         if (droppedFiles !== undefined) {
@@ -277,18 +411,9 @@ export function UsdBody(props) {
           else disposeObject(result.object)
           return
         }
-        // Bound before the view exists, so the first frame already shows the
-        // bodies in their rest pose instead of re-parenting them a frame later.
         // A stage that declares parts but cannot be bound still previews: the
-        // geometry is the file, the articulation is an extra.
-        if (result.articulation !== undefined) {
-          try {
-            result.parts = createArticulationController(result.object, result.articulation)
-          } catch (error) {
-            result.articulationError = error instanceof Error ? error.message : String(error)
-          }
-        }
-        setParsed(result)
+        // geometry is the file, the articulation is an extra (see adopt()).
+        setParsed(adopt(result))
       } catch (error) {
         if (cancelled) return
         setFailure(error instanceof Error ? error.message : String(error))
@@ -299,7 +424,7 @@ export function UsdBody(props) {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [data, resourceAddress, droppedFiles, droppedRootKey])
+  }, [data, resourceAddress, droppedFiles, droppedRootKey, remoteStage])
 
   useEffect(() => {
     const container = containerRef.current
@@ -323,9 +448,23 @@ export function UsdBody(props) {
     const stopFrame = parts === undefined
       ? undefined
       : view.onFrame(deltaMs => parts.tick(deltaMs) === true)
-    const stopPick = parts === undefined
-      ? undefined
-      : view.onPick((hits) => { if (parts.pick(hits) === true) view.requestRender() })
+    // Picking serves two purposes: an articulated stage opens the clicked part,
+    // a static one names it. Both are the same click. A stage above the picking
+    // budget kept the engine's post-upload release, so its vertex arrays are
+    // gone and three's raycaster would throw on them: no handler, no click.
+    const stopPick = parsed.pickable === true
+      ? view.onPick((hits) => {
+        if (parts !== undefined && parts.pick(hits) === true) view.requestRender()
+        const hit = hits[0]
+        const object = hit?.object
+        const name = object === undefined
+          ? undefined
+          : (object.isInstancedMesh === true && Array.isArray(object.userData?.paths)
+            ? object.userData.paths[hit.instanceId]
+            : object.name)
+        setPicked(typeof name === 'string' && name.startsWith('/') ? name : null)
+      })
+      : undefined
     return () => {
       stopFrame?.()
       stopPick?.()
@@ -361,6 +500,24 @@ export function UsdBody(props) {
   }, [wireframe, parsed])
 
   const reset = useCallback(() => { viewRef.current?.reset() }, [])
+
+  const primPaths = useMemo(() => (parsed === null ? [] : collectPrimPaths(parsed.object)), [parsed])
+  const shownPrims = useMemo(() => {
+    const needle = primFilter.trim().toLowerCase()
+    if (needle === '') return primPaths
+    return primPaths.filter(path => path.toLowerCase().includes(needle))
+  }, [primFilter, primPaths])
+  const visiblePrims = shownPrims.slice(0, PRIM_ROW_LIMIT)
+
+  const copyPath = useCallback(async (path) => {
+    try {
+      await navigator.clipboard.writeText(path)
+      setCopiedPath(path)
+      window.setTimeout(() => setCopiedPath(current => (current === path ? null : current)), 1500)
+    } catch {
+      setCopiedPath(null)
+    }
+  }, [])
 
   const notices = []
   if (parsed !== null && parsed.stats.meshes === 0 && parsed.stats.points === 0) {
@@ -422,6 +579,7 @@ export function UsdBody(props) {
       data-usd-engine-error={parsed?.engineError ?? ''}
       data-usd-parts={parts === undefined ? 0 : parts.movingParts}
       data-usd-colliders={parts?.hasColliders === true ? '1' : '0'}
+      data-usd-pickable={parsed?.pickable === true ? '1' : '0'}
     >
       <div ref={containerRef} style={CANVAS} data-usd-preview-stage />
       {failure !== null && (
@@ -496,11 +654,77 @@ export function UsdBody(props) {
             <button type="button" style={buttonStyle(wireframe)} onClick={() => { setWireframe(value => !value) }}>
               {label('wireframe', 'Wireframe')}
             </button>
+            <button
+              type="button"
+              style={buttonStyle(primsOpen)}
+              data-usd-prims-toggle
+              title={label('primsHint', 'Show the prim paths this stage carries')}
+              onClick={() => setPrimsOpen(value => !value)}
+            >
+              {label('prims', 'Prims')} · {primPaths.length}
+            </button>
           </div>
-          <div style={HINT}>
+          {!primsOpen && <div style={HINT}>
             {label('help', 'Drag to orbit · wheel to zoom · right-drag to pan')}
             {partsHint === undefined ? '' : <div style={{ marginTop: 2 }} data-usd-parts-hint>{partsHint}</div>}
-          </div>
+            {picked === null ? '' : (
+              <div style={{ marginTop: 2 }} data-usd-picked>
+                {label('picked', 'Picked')}: <span style={{ fontFamily: PRIM_MONO }}>{picked}</span>
+              </div>
+            )}
+          </div>}
+          {primsOpen && (
+            <div style={PRIMS} data-usd-prims>
+              <div style={PRIM_HEAD}>
+                <span style={{ flex: '1 1 auto' }}>
+                  {label('prims', 'Prims')} · {shownPrims.length}/{primPaths.length}
+                </span>
+                <span style={{ opacity: 0.7 }}>{label('primsClick', 'click to copy')}</span>
+              </div>
+              {picked === null ? null : (
+                <div style={PRIM_PICKED} data-usd-picked>
+                  <span style={{ flex: '0 0 auto', color: LABEL_DIM }}>{label('picked', 'Picked')}:</span>
+                  <button
+                    type="button"
+                    style={{ ...primRowStyle(true), width: 'auto', flex: '1 1 auto', padding: '1px 4px' }}
+                    title={picked}
+                    onClick={() => void copyPath(picked)}
+                  >
+                    {copiedPath === picked ? '✓ ' : ''}{picked}
+                  </button>
+                </div>
+              )}
+              <input
+                type="text"
+                value={primFilter}
+                spellCheck={false}
+                onChange={event => setPrimFilter(event.target.value)}
+                placeholder={label('primsFilter', 'Filter prim paths…')}
+                style={PRIM_FILTER}
+                aria-label={label('primsFilter', 'Filter prim paths')}
+              />
+              <div style={PRIM_LIST}>
+                {shownPrims.length === 0
+                  ? <div style={{ padding: '2px 6px', color: LABEL_DIM }}>{label('primsEmpty', 'No prim paths in this stage')}</div>
+                  : visiblePrims.map(path => (
+                    <button
+                      key={path}
+                      type="button"
+                      style={primRowStyle(picked === path)}
+                      title={path}
+                      onClick={() => void copyPath(path)}
+                    >
+                      {copiedPath === path ? '✓ ' : ''}{path}
+                    </button>
+                  ))}
+                {shownPrims.length > PRIM_ROW_LIMIT && (
+                  <div style={{ padding: '2px 6px', color: LABEL_DIM }}>
+                    {label('primsLimited', 'list clipped to the first')} {PRIM_ROW_LIMIT} / {shownPrims.length}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           {stats !== undefined && <div style={STATS} data-usd-stats>{stats}</div>}
           {engineWarnings.length > 0 && (
             <div style={WARNINGS} data-usd-warnings>

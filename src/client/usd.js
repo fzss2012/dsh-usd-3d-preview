@@ -15,6 +15,12 @@ export const USD_TAB_ID = 'dsh-usd-3d-preview/panel'
 /** The kind the external-asset page tab opens as; unique across the profile. */
 export const USD_TAB_KIND = 'usd-3d-preview'
 
+/** Sidebar page tab that browses the read-only object storage. */
+export const USD_OBJSTORE_TAB_ID = 'dsh-usd-3d-preview/objstore'
+
+/** The kind the object-storage page tab opens as. */
+export const USD_OBJSTORE_TAB_KIND = 'usd-objstore'
+
 /** File suffixes this implementation renders, without a leading dot. */
 export const USD_EXTENSIONS = ['usd', 'usda', 'usdc', 'usdz']
 

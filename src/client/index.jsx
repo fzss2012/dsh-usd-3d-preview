@@ -30,10 +30,14 @@ import { UsdPreviewGlyph } from './artwork.jsx'
 import { UsdDropBody } from './DropBody.jsx'
 import { watchSidebarDrops } from './sidebar-drop.js'
 import { UsdBody } from './UsdBody.jsx'
+import { UsdObjectStoreBody } from './ObjStoreBody.jsx'
 import { en, zh } from './locales.js'
+import { offerDropped } from './dropped.js'
 import {
   parseFileReference,
   siblingPath,
+  USD_OBJSTORE_TAB_ID,
+  USD_OBJSTORE_TAB_KIND,
   USD_PREVIEW_ID,
   USD_TAB_ID,
   USD_TAB_KIND,
@@ -189,6 +193,37 @@ export function apply(ctx) {
     openTab: () => ctx.sidebarRight.openTab(USD_TAB_KIND),
     hintText: () => t('dropOverlay'),
   }), 'usd-3d-preview: sidebar drop')
+
+  // ── object storage: a page tab that browses the read-only asset bucket ─────
+  // Selecting a stage here reuses the pending-drop channel the sidebar drag
+  // uses, so it opens in the existing USD preview tab with no second path.
+  const openDroppedStage = (drop) => {
+    offerDropped(drop)
+    ctx.sidebarRight.openTab(USD_TAB_KIND)
+  }
+
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: USD_OBJSTORE_TAB_ID,
+    kind: USD_OBJSTORE_TAB_KIND,
+    priority: 'extension',
+    title: () => t('objstoreTitle'),
+    guide: [{
+      id: 'browse',
+      // Between Files (10) and the USD preview (15): browsing is the source,
+      // the preview is where one object ends up.
+      order: 12,
+      title: () => t('objstoreTitle'),
+      description: () => t('objstoreGuide'),
+      icon: UsdPreviewGlyph,
+    }],
+  }), 'usd-3d-preview: object storage tab type')
+
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab',
+    key: USD_OBJSTORE_TAB_ID,
+    locale: NS,
+    inject: () => ({ openDroppedStage }),
+  }, UsdObjectStoreBody)), 'usd-3d-preview: object storage tab body')
 }
 
 export { parseFileReference, siblingPath }
