@@ -18,14 +18,9 @@ import { UsdPreviewGlyph } from './artwork.jsx'
 import { collectDropped, defaultStage, subscribeDropped, takePendingDropped } from './dropped.js'
 import { openStage } from './s3open.js'
 import { UsdBody } from './UsdBody.jsx'
-
-const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
-const LABEL_DIM = 'var(--dsw-alias-label-secondary, #a9b0bd)'
-const ACCENT = 'var(--dsw-alias-brand-primary, #4d8dff)'
-const BORDER = 'var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14))'
-const SURFACE = 'var(--dsw-alias-bg-overlay, rgba(24, 26, 32, 0.86))'
-const ERROR = 'var(--dsw-alias-state-error-primary, #ff6b6b)'
-const FONT = 'var(--dsw-font-ui, system-ui, sans-serif)'
+import {
+  ACCENT, BASE, BORDER, BORDER_STRONG, ERROR, FONT, LABEL, LABEL_DIM, LAYER, PRIMARY_FILL, PRIMARY_INK, SURFACE,
+} from './tokens.js'
 
 const SHELL = {
   position: 'absolute',
@@ -33,7 +28,7 @@ const SHELL = {
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
-  background: 'var(--dsw-alias-bg-base, #14161a)',
+  background: BASE,
   color: LABEL,
   fontFamily: FONT,
   fontSize: 12,
@@ -79,8 +74,8 @@ const ZONE = {
   borderRadius: 12,
   borderWidth: 1.5,
   borderStyle: 'dashed',
-  borderColor: 'var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.24))',
-  background: 'var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.03))',
+  borderColor: BORDER_STRONG,
+  background: LAYER,
   textAlign: 'center',
 }
 
@@ -100,7 +95,7 @@ const S3_INPUT = {
   padding: '4px 8px',
   borderRadius: 6,
   border: '1px solid ' + BORDER,
-  background: 'var(--dsw-alias-bg-base, #14161a)',
+  background: BASE,
   color: LABEL,
   font: 'inherit',
   fontSize: 11,
@@ -115,12 +110,13 @@ const PICKER = { display: 'flex', flexDirection: 'column', gap: 6, width: '100%'
  * @returns the inline style.
  */
 function buttonStyle(primary) {
+  const filled = primary === true
   return {
     padding: '4px 10px',
     borderRadius: 6,
-    border: `1px solid ${primary === true ? ACCENT : BORDER}`,
-    background: primary === true ? ACCENT : SURFACE,
-    color: primary === true ? '#fff' : LABEL,
+    border: `1px solid ${filled ? PRIMARY_FILL : BORDER}`,
+    background: filled ? PRIMARY_FILL : SURFACE,
+    color: filled ? PRIMARY_INK : LABEL,
     font: 'inherit',
     fontSize: 11,
     cursor: 'pointer',

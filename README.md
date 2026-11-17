@@ -330,14 +330,18 @@ not reachable until one is deployed; the USD preview itself does not depend on i
 
 ## Prim paths
 
-The viewport toolbar carries a **Prims · N** button. It opens a panel listing the geometry-bearing
+The viewport toolbar carries a **Prims · N** button. It opens a panel showing the geometry-bearing
 prim paths the composed graph carries — `/WindowUnit/Geometry/Frame`, for instance — read from the
 engine's own nodes (each mesh's `name` is its prim path; an instanced batch exposes
-`userData.paths`). Rows are filterable and copy to the clipboard on click; a very large list is
-clipped and the clip is stated in the panel.
+`userData.paths`). Paths are shown as a **hierarchy**: `/World/Geometry/Body` becomes an expandable
+`World › Geometry › Body` tree, with folder and prim glyphs, natural numeric ordering
+(`Wheel_2` before `Wheel_10`), and each row's short name; hovering a row reveals its full path.
+Folders start expanded and a click collapses or reopens one; clicking a prim copies its full path.
+Filtering keeps every match together with its ancestors and subtrees, and a very large tree is
+clipped with the clip count stated in the panel.
 
-Clicking the model names the prim under the cursor: the panel shows it as **Picked:**, highlights
-the matching row, and the closed-panel hint carries the same line. Naming a prim needs the vertex
+Clicking the model names the prim under the cursor: the panel shows it as **Picked:**, reveals its
+folders, highlights the matching row, and the closed-panel hint carries the same line. Naming a prim needs the vertex
 arrays three's raycaster reads, which the engine frees after upload. They are kept for stages below
 a triangle budget (2 million by default; set `globalThis.__DSH_USD_PICK_TRIANGLE_BUDGET__` before
 the bundle runs to change it), so a stage above the budget keeps the engine's release and its canvas
@@ -431,6 +435,7 @@ terminal update plus a host restart, because the route is itself part of the new
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
 | `instancer` | the custom-type rewrite in isolation: a prim whose **own** fields carry `protoIndices` and `prototypes`/`positions` is promoted, a custom group around an instancer is not, and a prim with only part of the signature stays untouched — the container case is what protects a nested custom-instancer library |
 | `drop` | the external-asset path without a browser: name/key helpers, stage candidates and the auto-open rule, BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, picker collection, and the capture-phase sidebar listener against a faked document (USD drag claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
+| `prim-tree` | the prim-path hierarchy in isolation: natural numeric ordering, tree building with copyable ancestor folders, ancestor-preserving filtering, bounded flattening with an honest total, and picked-path ancestor reveal |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
 | `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and the asset/health routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |

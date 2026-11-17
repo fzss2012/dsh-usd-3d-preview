@@ -45,3 +45,52 @@ export function UsdPreviewGlyph({ size = 24, className }) {
     </svg>
   )
 }
+/**
+ * A chevron that rotates to show a folder's open state.
+ * @param props - size and whether the folder is expanded.
+ * @returns the chevron, coloured by currentColor.
+ */
+export function TreeChevron({ size = 12, open = false }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+      style={{ display: 'block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 120ms ease' }}
+    >
+      <path d="M4 2.5 8 6l-4 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/**
+ * A folder glyph for a node that has children.
+ * @param props - size and whether the folder is open.
+ * @returns the folder, coloured by currentColor.
+ */
+export function TreeFolder({ size = 13, open = false }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false" style={{ display: 'block' }}>
+      {open === true
+        ? <path d="M1.5 4.5h5l1.4 1.6h6.6v6.4H1.5V4.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+        : <path d="M1.5 4h4.8l1.4 1.6h7v7H1.5V4Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />}
+    </svg>
+  )
+}
+
+/**
+ * A small cube glyph for a prim that carries geometry.
+ * @param props - icon size.
+ * @returns the cube, coloured by currentColor.
+ */
+export function TreePrim({ size = 12 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false" style={{ display: 'block' }}>
+      <path d="M8 1.6 13.5 4.7v6.6L8 14.4 2.5 11.3V4.7L8 1.6Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M2.5 4.7 8 7.8l5.5-3.1M8 7.8v6.6" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" opacity="0.65" />
+    </svg>
+  )
+}

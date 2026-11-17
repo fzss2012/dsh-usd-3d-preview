@@ -15,25 +15,23 @@
  * scrollbar binding.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { TreeChevron, TreeFolder, TreePrim } from './artwork.jsx'
 import { createArticulationController } from './kinematics.js'
 import { assemble, disposeObject } from './parse.js'
+import {
+  allFolderPaths, ancestorsOf, buildPrimTree, countPrimNodes, filterPrimTree, flattenPrimTree,
+} from './prim-tree.js'
+import { ACCENT, ACCENT_WASH, BASE, BORDER, ERROR, FONT, LABEL, LABEL_DIM, MONO, SURFACE } from './tokens.js'
 import { absoluteFilePath, assetUriOf, parseFileReference, siblingPath, usdFileName } from './usd.js'
 import { createView } from './view.js'
-
-const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
-const LABEL_DIM = 'var(--dsw-alias-label-secondary, #a9b0bd)'
-const ACCENT = 'var(--dsw-alias-brand-primary, #4d8dff)'
-const BORDER = 'var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14))'
-const SURFACE = 'var(--dsw-alias-bg-overlay, rgba(24, 26, 32, 0.86))'
-const ERROR = 'var(--dsw-alias-state-error-primary, #ff6b6b)'
 
 const SHELL = {
   position: 'absolute',
   inset: 0,
   overflow: 'hidden',
-  background: 'var(--dsw-alias-bg-base, #14161a)',
+  background: BASE,
   color: LABEL,
-  fontFamily: 'var(--dsw-font-ui, system-ui, sans-serif)',
+  fontFamily: FONT,
   fontSize: 12,
 }
 
@@ -130,7 +128,7 @@ const PRIM_FILTER = {
   padding: '3px 7px',
   borderRadius: 6,
   border: '1px solid ' + BORDER,
-  background: 'var(--dsw-alias-bg-base, #14161a)',
+  background: BASE,
   color: LABEL,
   font: 'inherit',
   fontSize: 11,
@@ -147,27 +145,41 @@ const PRIM_PICKED = {
   fontSize: 11,
 }
 
-const PRIM_MONO = 'var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)'
+const PRIM_MONO = MONO
 
-function primRowStyle(active) {
+/**
+ * One tree row. The caret occupies a fixed gutter so a folder and its leaf
+ * children line up; the indent gives the hierarchy its shape.
+ * @param active - whether this row is the picked or copied path.
+ * @param depth - indentation level.
+ * @returns the inline style.
+ */
+function primRowStyle(active, depth = 0) {
   return {
-    display: 'block',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 3,
     width: '100%',
-    padding: '2px 6px',
+    padding: '2px 6px 2px ' + (4 + depth * 13) + 'px',
     borderRadius: 5,
     border: 'none',
-    background: active ? 'rgba(77, 141, 255, 0.16)' : 'transparent',
+    background: active ? ACCENT_WASH : 'transparent',
     color: active ? ACCENT : LABEL,
     font: 'inherit',
     fontSize: 11,
     fontFamily: PRIM_MONO,
     textAlign: 'left',
     whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
     cursor: 'pointer',
   }
 }
+
+/** The little state icon at the front of a tree row. */
+const PRIM_ICON = { flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 12, height: 12 }
+/** The label that carries the name and tolerates overflow. */
+const PRIM_LABEL = { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }
+/** Ancestor folders are dimmer than the prim that actually carries geometry. */
+const PRIM_FOLDER_INK = { opacity: 0.75 }
 
 /** Collect every prim path the composed three graph carries. */
 function collectPrimPaths(object) {
@@ -283,6 +295,9 @@ export function UsdBody(props) {
   // the composed graph carries, and a click on the model selects its own.
   const [primsOpen, setPrimsOpen] = useState(false)
   const [primFilter, setPrimFilter] = useState('')
+  // Folders the reader has opened. Everything starts expanded when the panel is
+  // first shown; a collapse only hides a subtree, it never changes the data.
+  const [collapsedFolders, setCollapsedFolders] = useState(() => new Set())
   const [picked, setPicked] = useState(null)
   const [copiedPath, setCopiedPath] = useState(null)
 
@@ -502,12 +517,49 @@ export function UsdBody(props) {
   const reset = useCallback(() => { viewRef.current?.reset() }, [])
 
   const primPaths = useMemo(() => (parsed === null ? [] : collectPrimPaths(parsed.object)), [parsed])
-  const shownPrims = useMemo(() => {
-    const needle = primFilter.trim().toLowerCase()
-    if (needle === '') return primPaths
-    return primPaths.filter(path => path.toLowerCase().includes(needle))
-  }, [primFilter, primPaths])
-  const visiblePrims = shownPrims.slice(0, PRIM_ROW_LIMIT)
+  const primTree = useMemo(() => buildPrimTree(primPaths), [primPaths])
+  const primCount = useMemo(() => countPrimNodes(primTree), [primTree])
+  const filtered = useMemo(() => filterPrimTree(primTree, primFilter), [primTree, primFilter])
+  // Filtering shows every match with its ancestors and subtrees fully open;
+  // without a filter the reader's own collapse choices decide what is visible.
+  const visibleTree = filtered.tree
+  const expandedFolders = useMemo(() => {
+    if (filtered.active === true) return allFolderPaths(visibleTree)
+    const all = allFolderPaths(primTree)
+    for (const path of collapsedFolders) all.delete(path)
+    return all
+  }, [filtered.active, visibleTree, primTree, collapsedFolders])
+  const primRows = useMemo(
+    () => flattenPrimTree(visibleTree, expandedFolders, { limit: PRIM_ROW_LIMIT, forcedOpen: filtered.active }),
+    [visibleTree, expandedFolders, filtered.active],
+  )
+  const shownCount = useMemo(() => countPrimNodes(visibleTree), [visibleTree])
+
+  const toggleFolder = useCallback((path) => {
+    setCollapsedFolders(current => {
+      const next = new Set(current)
+      // The set stores collapsed folders; clicking a folder toggles membership.
+      if (next.has(path) === true) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }, [])
+
+  // When a prim is picked on the model, reveal it in the tree by opening every
+  // folder on the way to it. Its ancestors were collapsed only by the reader.
+  useEffect(() => {
+    if (picked === null) return
+    const ancestors = ancestorsOf(picked)
+    if (ancestors.length === 0) return
+    setCollapsedFolders(current => {
+      const next = new Set(current)
+      let changed = false
+      for (const path of ancestors) {
+        if (next.delete(path) === true) changed = true
+      }
+      return changed === true ? next : current
+    })
+  }, [picked])
 
   const copyPath = useCallback(async (path) => {
     try {
@@ -661,7 +713,7 @@ export function UsdBody(props) {
               title={label('primsHint', 'Show the prim paths this stage carries')}
               onClick={() => setPrimsOpen(value => !value)}
             >
-              {label('prims', 'Prims')} · {primPaths.length}
+              {label('prims', 'Prims')} · {primCount}
             </button>
           </div>
           {!primsOpen && <div style={HINT}>
@@ -677,7 +729,7 @@ export function UsdBody(props) {
             <div style={PRIMS} data-usd-prims>
               <div style={PRIM_HEAD}>
                 <span style={{ flex: '1 1 auto' }}>
-                  {label('prims', 'Prims')} · {shownPrims.length}/{primPaths.length}
+                  {label('prims', 'Prims')} · {shownCount}/{primCount}
                 </span>
                 <span style={{ opacity: 0.7 }}>{label('primsClick', 'click to copy')}</span>
               </div>
@@ -704,22 +756,42 @@ export function UsdBody(props) {
                 aria-label={label('primsFilter', 'Filter prim paths')}
               />
               <div style={PRIM_LIST}>
-                {shownPrims.length === 0
+                {primRows.rows.length === 0
                   ? <div style={{ padding: '2px 6px', color: LABEL_DIM }}>{label('primsEmpty', 'No prim paths in this stage')}</div>
-                  : visiblePrims.map(path => (
-                    <button
-                      key={path}
-                      type="button"
-                      style={primRowStyle(picked === path)}
-                      title={path}
-                      onClick={() => void copyPath(path)}
-                    >
-                      {copiedPath === path ? '✓ ' : ''}{path}
-                    </button>
-                  ))}
-                {shownPrims.length > PRIM_ROW_LIMIT && (
+                  : primRows.rows.map(({ node, depth }) => {
+                    const folder = node.children.size > 0
+                    const open = expandedFolders.has(node.path) === true
+                    const active = picked === node.path || copiedPath === node.path
+                    return (
+                      <button
+                        key={node.path}
+                        type="button"
+                        data-usd-prim-row
+                        data-usd-prim-path={node.path}
+                        data-usd-prim-folder={folder === true ? '1' : undefined}
+                        data-depth={depth}
+                        aria-expanded={folder === true ? open : undefined}
+                        style={primRowStyle(active, depth)}
+                        title={node.path}
+                        onClick={() => (folder === true ? toggleFolder(node.path) : void copyPath(node.path))}
+                      >
+                        <span style={PRIM_ICON}>
+                          {folder === true
+                            ? <TreeChevron open={filtered.active === true || open} />
+                            : null}
+                        </span>
+                        <span style={PRIM_ICON}>
+                          {folder === true
+                            ? <span style={PRIM_FOLDER_INK}><TreeFolder open={filtered.active === true || open} /></span>
+                            : <TreePrim />}
+                        </span>
+                        <span style={PRIM_LABEL}>{copiedPath === node.path ? '✓ ' : ''}{node.name}</span>
+                      </button>
+                    )
+                  })}
+                {primRows.truncated && (
                   <div style={{ padding: '2px 6px', color: LABEL_DIM }}>
-                    {label('primsLimited', 'list clipped to the first')} {PRIM_ROW_LIMIT} / {shownPrims.length}
+                    {label('primsLimited', 'list clipped to the first')} {PRIM_ROW_LIMIT} / {primRows.total}
                   </div>
                 )}
               </div>

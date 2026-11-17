@@ -12,6 +12,7 @@
  * there is what makes the sidebar the drop's owner.
  */
 import { acceptsDroppedAsset, collectDropped, offerDropped, takePendingDropped } from './dropped.js'
+import { ACCENT, BORDER, LABEL, SURFACE } from './tokens.js'
 
 /** The panel element the right Sidebar mounts; a drop anywhere inside it is ours. */
 export const SIDEBAR_PANEL_SELECTOR = '[data-sidebar-right-panel]'
@@ -24,7 +25,8 @@ const HINT_ATTRIBUTE = 'data-usd-drop-hint'
 
 const STYLE_ID = 'dsh-usd-3d-preview-drop-style'
 
-const STYLE = `${SIDEBAR_PANEL_SELECTOR}[${ACTIVE_ATTRIBUTE}="true"]{outline:2px dashed var(--dsw-alias-brand-primary,#4d8dff);outline-offset:-2px}`
+// The drop outline is an accent, so it reads the accent token, not the ink one.
+const STYLE = `${SIDEBAR_PANEL_SELECTOR}[${ACTIVE_ATTRIBUTE}="true"]{outline:2px dashed ${ACCENT};outline-offset:-2px}`
 
 /**
  * The sidebar panel a drag event is over.
@@ -90,9 +92,9 @@ export function watchSidebarDrops({ openTab, hintText, document: doc = globalThi
       borderRadius: '8px',
       fontSize: '12px',
       pointerEvents: 'none',
-      color: 'var(--dsw-alias-label-primary, #e6e8ec)',
-      background: 'var(--dsw-alias-bg-overlay, rgba(24, 26, 32, 0.86))',
-      border: '1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14))',
+      color: LABEL,
+      background: SURFACE,
+      border: '1px solid ' + BORDER,
     })
     doc.body?.appendChild(hint)
   }

@@ -404,16 +404,36 @@ try {
       await primsToggle.click()
       const panel = page.locator('[data-usd-prims]')
       await panel.waitFor()
-      const rows = panel.locator('button')
-      assert.equal(await rows.count(), primCount, `${path}: the panel lists every collected prim path`)
-      const firstRow = (await rows.nth(0).innerText()).replace('✓', '').trim()
-      assert.ok(firstRow.startsWith('/'), `${path}: a row must be a prim path, got ${firstRow}`)
+      const rows = panel.locator('[data-usd-prim-row]')
+      const rowCount = await rows.count()
+      assert.ok(rowCount >= 2 && rowCount <= primCount, `${path}: the tree must show rows within the prim count, got ${rowCount}/${primCount}`)
+      // Every row carries its full path as data, and names in the tree are the
+      // last segment of that path rather than the whole repeated prefix.
+      const firstPath = await rows.nth(0).getAttribute('data-usd-prim-path')
+      assert.ok(firstPath !== null && firstPath.startsWith('/'), `${path}: a row must carry a prim path, got ${firstPath}`)
+      const firstName = (await rows.nth(0).innerText()).replace('✓', '').trim()
+      assert.equal(firstName, firstPath.split('/').filter(Boolean).pop(), `${path}: a row shows its segment name`)
       const filter = panel.locator('input')
-      await filter.fill(firstRow.split('/').filter(Boolean).pop())
+      await filter.fill(firstPath.split('/').filter(Boolean).pop())
       await page.waitForTimeout(250)
       assert.ok(await rows.count() >= 1, `${path}: the filter must keep a match`)
+      // Filtering exposes every match with its ancestors and subtrees open.
+      const filteredPaths = await rows.evaluateAll(nodes => nodes.map(n => n.getAttribute('data-usd-prim-path')))
+      assert.ok(filteredPaths.every(p => p === null || p.toLowerCase().includes(firstPath.split('/').filter(Boolean).pop().toLowerCase()) || firstPath.toLowerCase().includes(p.toLowerCase())), `${path}: the filter must keep ancestors with their matches`)
       await filter.fill('')
       await page.waitForTimeout(250)
+      // A folder row toggles its children; a leaf row copies its path. This is
+      // checked with the filter off: a filtered tree forces every match open.
+      const folder = panel.locator('[data-usd-prim-folder="1"]')
+      if (await folder.count() > 0) {
+        const before = await rows.count()
+        await folder.first().click()
+        await page.waitForTimeout(120)
+        const after = await rows.count()
+        assert.ok(after < before || after > before, `${path}: collapsing a folder must change the visible rows`)
+        await folder.first().click()
+        await page.waitForTimeout(120)
+      }
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
       await page.waitForTimeout(1000)
       const pickedCount = await page.locator('[data-usd-picked]').count()

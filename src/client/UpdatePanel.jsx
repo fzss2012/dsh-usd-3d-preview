@@ -8,6 +8,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ACCENT, BASE, BORDER, ERROR, FONT, LABEL, LABEL_DIM, MONO, PRIMARY_FILL, PRIMARY_INK, SUCCESS, SURFACE,
+} from './tokens.js'
+import {
   applyUpdate,
   loadUpdateStatus,
   matchesUpdateSubject,
@@ -15,17 +18,6 @@ import {
   updateAvailable,
   updateState,
 } from './update.js'
-
-const LABEL = 'var(--dsw-alias-label-primary, #e6e8ec)'
-const LABEL_DIM = 'var(--dsw-alias-label-secondary, #a9b0bd)'
-const ACCENT = 'var(--dsw-alias-brand-primary, #4d8dff)'
-const BORDER = 'var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14))'
-const SURFACE = 'var(--dsw-alias-bg-overlay, rgba(24, 26, 32, 0.86))'
-const BASE = 'var(--dsw-alias-bg-base, #14161a)'
-const ERROR = 'var(--dsw-alias-state-error-primary, #ff6b6b)'
-const SUCCESS = 'var(--dsw-alias-state-success-primary, #43c780)'
-const FONT = 'var(--dsw-font-ui, system-ui, sans-serif)'
-const MONO = 'var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)'
 
 const PANEL = {
   display: 'flex',
@@ -43,7 +35,7 @@ const PANEL = {
 const HEAD = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
 const TITLE = { fontWeight: 600, fontSize: 13 }
 const VERSION = { color: LABEL_DIM, fontFamily: MONO, fontSize: 11 }
-const TAG = { padding: '0 6px', borderRadius: 4, fontSize: 10, lineHeight: '16px', background: ACCENT, color: '#fff' }
+const TAG = { padding: '0 6px', borderRadius: 4, fontSize: 10, lineHeight: '16px', background: PRIMARY_FILL, color: PRIMARY_INK }
 const INTRO = { color: LABEL_DIM, lineHeight: 1.6, fontSize: 11 }
 const LINE = { display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 11, color: LABEL_DIM, minWidth: 0 }
 const VALUE = { color: LABEL, fontFamily: MONO, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
@@ -77,12 +69,13 @@ function label(t, key, fallback) {
 
 /** One button, styled like the rest of the plugin. */
 function buttonStyle(primary) {
+  const filled = primary === true
   return {
     padding: '2px 10px',
     borderRadius: 5,
-    border: '1px solid ' + (primary ? ACCENT : BORDER),
-    background: primary ? ACCENT : BASE,
-    color: primary ? '#fff' : LABEL,
+    border: '1px solid ' + (filled ? PRIMARY_FILL : BORDER),
+    background: filled ? PRIMARY_FILL : BASE,
+    color: filled ? PRIMARY_INK : LABEL,
     font: 'inherit',
     fontSize: 11,
     cursor: 'pointer',
