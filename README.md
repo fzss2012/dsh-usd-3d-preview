@@ -454,6 +454,34 @@ pick the bundle up. The browser half hot-reloads; the host half goes through Nod
 cache, so a host change needs an app restart. To switch the plugin off, disable it in
 Settings → Plugins, or set `disabled: true` on the `ui-usd-3d-preview` entry in the patch layer.
 
+### Front-end hot reload (development)
+
+The Web shell ships a client HMR transport that stat-polls every plugin's
+`lib/client.js` and hot-swaps the browser bundle when its mtime or size changes —
+no page refresh and no app restart. For a directory install the missing piece is
+a build watcher, which this checkout provides:
+
+```bash
+npm run dev:watch
+```
+
+It watches `src/client/`, `src/host/`, `build.mjs` and `package.json` (the last two
+through the package directory, because a watcher bound to a single file stops
+delivering events once an editor saves atomically), and on every change it
+rebuilds. Where the result goes depends on how the plugin is installed:
+
+- **copy install** — the profile holds its own copy of the bundle, at
+  `$HOME/.dsh/bundles/usd-3d-preview` by default; the fresh `lib/*.js` is copied in.
+- **link install** — the profile depends on `link:` to this checkout and reads
+  `lib/` here, so nothing is copied: the rebuild *is* the hot reload. Point
+  `DSH_USD_INSTALL_DIR` at the checkout to say so explicitly.
+
+The install directory is checked once at startup: a path that does not exist is
+refused with the two spellings above instead of failing on every rebuild, and
+`DSH_USD_DEBOUNCE_MS` is validated rather than turning a typo into a build per
+filesystem event. Host-half changes also rewrite `lib/index.js`, but Node's ESM
+cache needs an app restart for those; front-end edits never do.
+
 ### Updating a local checkout
 
 Because the install is a `link:` to a built checkout, updating the plugin means: fast-forward

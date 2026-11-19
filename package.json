@@ -47,6 +47,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
+    "dev:watch": "node scripts/dev-watch.mjs",
     "update:local": "node scripts/update-local.mjs",
     "prepare": "node build.mjs",
     "test": "node tests/run.mjs"
