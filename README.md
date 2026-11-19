@@ -414,7 +414,9 @@ node scripts/update-local.mjs --json          # machine-readable (the update rou
 Rules: the working tree must be clean; the update is a `git merge --ff-only` of the checkout's
 own upstream (never a reset, force, or rebase); only `git`, `npm install --no-audit --no-fund`
 (when `package.json` changed or `node_modules` is missing) and `npm run build` are spawned, with
-fixed argv and no shell interpolation. A published/installed copy without `.git` reports
+fixed argv. On Windows `npm` is a `.cmd` shim, which Node refuses to spawn without a shell
+(CVE-2024-27980), so that one command is quoted and handed to `cmd.exe` — every other command is
+still a plain argv spawn with no shell. A published/installed copy without `.git` reports
 "not a git checkout" and changes nothing. `--restart` uses the systemd user service named by
 `DSH_WEB_SERVICE` (default `dsh-web.service`) on Linux, and prints the manual command elsewhere;
 restarting disconnects the open Web UI.

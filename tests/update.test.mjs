@@ -17,7 +17,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createUpdateService, parseAheadBehind, tailLines, defaultRepoRoot } from '../src/host/update.js'
+import { createUpdateService, needsShell, parseAheadBehind, tailLines, defaultRepoRoot } from '../src/host/update.js'
 
 const lines = []
 function say(line) {
@@ -55,7 +55,15 @@ try {
   assert.deepEqual(tailLines('a\nb\nc\nd', 2), ['c', 'd'], 'tailLines keeps the last lines')
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
   assert.equal(defaultRepoRoot(), repoRoot, 'the default root is the package checkout')
-  say('update helpers       ahead/behind parsing, output tails, default root')
+  // The Windows shim rule, pinned without spawning anything: Node refuses a
+  // .cmd/.bat without a shell (CVE-2024-27980), and that is the whole reason the
+  // update can run npm on Windows at all.
+  assert.equal(needsShell('npm.cmd', 'win32'), true, 'a Windows .cmd shim needs a shell')
+  assert.equal(needsShell('NPM.CMD', 'win32'), true, 'the shim is matched case-insensitively')
+  assert.equal(needsShell('run.bat', 'win32'), true, 'a .bat needs a shell too')
+  assert.equal(needsShell('git', 'win32'), false, 'an .exe is spawned directly on Windows')
+  assert.equal(needsShell('npm', 'darwin'), false, 'POSIX never needs a shell')
+  say('update helpers       ahead/behind parsing, output tails, default root, Windows shim rule')
 
   // ── fake runner: exact status parsing and the refusal rules ─────────────
   const fakeRoot = join(work, 'fake-root')
@@ -228,7 +236,11 @@ try {
     await runChecked('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'v2'], seed)
     await runChecked('git', ['push', 'origin', 'main'], seed)
 
-    const service = createUpdateService({ root: clone, platform: 'darwin' })
+    // The host's own platform, not a pinned one: this case really runs npm, and
+    // Windows spells it "npm.cmd" — a command Node refuses to spawn without a
+    // shell. Pinning 'darwin' here tested a command line this machine never uses,
+    // and hid exactly that failure.
+    const service = createUpdateService({ root: clone, platform: process.platform })
     const checked = await service.check()
     assert.equal(checked.checked, true, 'the local origin is reachable')
     assert.equal(checked.behind, 1, 'the clone is one commit behind')

@@ -79,6 +79,42 @@ export function defaultRepoRoot() {
   return start
 }
 
+/**
+ * Whether a command has to be run through a shell.
+ *
+ * Node refuses to spawn a `.cmd` / `.bat` directly since the CVE-2024-27980 fix:
+ * `spawn('npm.cmd', …)` throws EINVAL before the child exists, so on Windows the
+ * update would fail on its very first command. `npm` is a `.cmd` shim there, and the
+ * documented way to run one is through the shell. Nothing else is affected: a
+ * `.exe` (git, systemctl, node) is spawned exactly as before, and so is everything on
+ * POSIX.
+ * @param command - the executable to run.
+ * @param platform - the platform to decide for (injected, so the rule is testable).
+ * @returns whether the spawn needs a shell.
+ */
+export function needsShell(command, platform = process.platform) {
+  if (platform !== 'win32') return false
+  const lower = String(command).toLowerCase()
+  return lower.endsWith('.cmd') || lower.endsWith('.bat')
+}
+
+/**
+ * Build the single command line a shell spawn takes.
+ *
+ * A shell spawn takes one string, not an argv array: passing both is what Node
+ * deprecated in DEP0190, because the array is concatenated rather than escaped and
+ * the result is a silent injection surface. So the arguments are quoted here, for
+ * the one case that needs a shell at all — `npm`'s Windows shim, whose arguments are
+ * package-script names and flags rather than user input.
+ * @param command - the executable.
+ * @param args - its arguments.
+ * @returns a command line a shell will split back into the same argv.
+ */
+function shellCommandLine(command, args) {
+  const quote = value => (/^[A-Za-z0-9_.:@/\\=+-]+$/.test(value) ? value : '"' + String(value).replaceAll('"', '\\"') + '"')
+  return [command, ...args].map(quote).join(' ')
+}
+
 /** Spawn one command and collect its output; never rejects. */
 export function createCommandRunner({ spawnImpl = spawn } = {}) {
   return (command, args, { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) => new Promise((resolve) => {
@@ -89,7 +125,11 @@ export function createCommandRunner({ spawnImpl = spawn } = {}) {
     const append = (text, current) => (current.length >= OUTPUT_LIMIT ? current : current + text)
     let child
     try {
-      child = spawnImpl(command, args, { cwd, windowsHide: true })
+      // One string through the shell when a Windows shim needs it, a plain argv
+      // spawn everywhere else (see `needsShell` / `shellCommandLine`).
+      child = needsShell(command) === true
+        ? spawnImpl(shellCommandLine(command, args), { cwd, windowsHide: true, shell: true })
+        : spawnImpl(command, args, { cwd, windowsHide: true })
     } catch (error) {
       resolve({ code: -1, stdout: '', stderr: String(error?.message ?? error), timedOut: false })
       return
