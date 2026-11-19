@@ -35,14 +35,18 @@
  */
 import { spawn } from 'node:child_process'
 import { watch } from 'node:fs'
-import { copyFile, mkdir, readFile, realpath, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const installDir = resolve(process.env.DSH_USD_INSTALL_DIR || join(
-  process.env.USERPROFILE || process.env.HOME || '.', '.dsh', 'bundles', 'usd-3d-preview',
-))
+/** The user's DSH home; a profile under it is what decides where this package is loaded from. */
+const dshHome = join(process.env.USERPROFILE || process.env.HOME || '.', '.dsh')
+/**
+ * Where the built bundle has to land. Resolved at startup (see `resolveInstallDir`),
+ * because the answer depends on how the plugin is installed, not on a constant.
+ */
+let installDir = resolve(process.env.DSH_USD_INSTALL_DIR || join(dshHome, 'bundles', 'usd-3d-preview'))
 
 /** Long enough to coalesce one editor save (temp write, rename, chmod) into a single build. */
 const DEFAULT_DEBOUNCE_MS = 250
@@ -175,6 +179,57 @@ async function isSamePath(a, b) {
   const [left, right] = await Promise.all([canonical(a), canonical(b)])
   // Windows paths are case-insensitive and fs.realpath returns the on-disk case.
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+}
+
+/**
+ * Find the directory the running profile actually loads this package from.
+ *
+ * The default is the conventional bundle path, and it is wrong in the one case that
+ * matters: a profile can point at any directory at all, including this checkout
+ * (`link:<checkout>`), and then a watcher aimed at the conventional path rebuilds and
+ * copies into a directory nothing reads. The profile's own link is the authority, so
+ * it is asked first, and the convention is only the fallback for a machine where the
+ * profile cannot be read.
+ *
+ * An explicit `DSH_USD_INSTALL_DIR` always wins: a caller who names a directory has
+ * said which profile they mean.
+ * @returns {Promise<string>} the install directory to build into.
+ */
+async function resolveInstallDir() {
+  if (process.env.DSH_USD_INSTALL_DIR !== undefined && process.env.DSH_USD_INSTALL_DIR !== '') {
+    return resolve(process.env.DSH_USD_INSTALL_DIR)
+  }
+  let profiles = []
+  try {
+    profiles = (await readdir(join(dshHome, 'profiles'))).sort()
+  } catch {
+    return resolve(join(dshHome, 'bundles', 'usd-3d-preview'))
+  }
+  /** Every profile that installs this package, as { name, target }. */
+  const candidates = []
+  for (const name of profiles) {
+    const link = join(dshHome, 'profiles', name, 'node_modules', 'dsh-usd-3d-preview')
+    const info = await stat(link).catch(() => undefined)
+    if (info === undefined) continue
+    candidates.push({ name, target: resolve(await canonical(link)) })
+  }
+  // A profile that links *this checkout* is the answer this watcher wants: it is the
+  // dev install, and recognising it means nothing is copied anywhere. Several profiles
+  // can link the package (a second, pinned copy is a normal thing to keep), and picking
+  // one by directory-listing order would make the target depend on the filesystem, so
+  // this checkout wins outright and the rest are only a fallback.
+  for (const candidate of candidates) {
+    if (await isSamePath(candidate.target, root)) return root
+  }
+  if (candidates.length > 1) {
+    process.stderr.write(
+      'dev-watch: ' + candidates.length + ' profiles install dsh-usd-3d-preview ('
+      + candidates.map(candidate => candidate.name).join(', ') + '); building for '
+      + candidates[0].name + '. Set DSH_USD_INSTALL_DIR to choose another.\n',
+    )
+  }
+  if (candidates.length > 0) return candidates[0].target
+  return resolve(join(dshHome, 'bundles', 'usd-3d-preview'))
 }
 
 /**
@@ -332,6 +387,7 @@ function watchPath(path, options, onEvent) {
 
 /** Validate the setup, print what is watched, and arm every watcher. */
 async function main() {
+  installDir = await resolveInstallDir()
   const install = await checkInstallDir()
   if (install === undefined) return 1
   linkInstall = install.link

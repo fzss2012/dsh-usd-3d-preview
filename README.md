@@ -468,19 +468,23 @@ npm run dev:watch
 It watches `src/client/`, `src/host/`, `build.mjs` and `package.json` (the last two
 through the package directory, because a watcher bound to a single file stops
 delivering events once an editor saves atomically), and on every change it
-rebuilds. Where the result goes depends on how the plugin is installed:
+rebuilds. Where the result goes depends on how the plugin is installed, so the
+script asks the profile first: it looks for a `node_modules/dsh-usd-3d-preview`
+link under `$HOME/.dsh/profiles/*` and builds for whichever directory that link
+resolves to. Two outcomes:
 
-- **copy install** — the profile holds its own copy of the bundle, at
-  `$HOME/.dsh/bundles/usd-3d-preview` by default; the fresh `lib/*.js` is copied in.
-- **link install** — the profile depends on `link:` to this checkout and reads
-  `lib/` here, so nothing is copied: the rebuild *is* the hot reload. Point
-  `DSH_USD_INSTALL_DIR` at the checkout to say so explicitly.
+- **link install** — the profile points at this checkout, so `lib/` here *is* the
+  install and nothing is copied: the rebuild is the hot reload.
+- **copy install** — the profile points at a directory holding its own copy of the
+  bundle (conventionally `$HOME/.dsh/bundles/usd-3d-preview`); the fresh `lib/*.js`
+  is copied in.
 
-The install directory is checked once at startup: a path that does not exist is
-refused with the two spellings above instead of failing on every rebuild, and
-`DSH_USD_DEBOUNCE_MS` is validated rather than turning a typo into a build per
-filesystem event. Host-half changes also rewrite `lib/index.js`, but Node's ESM
-cache needs an app restart for those; front-end edits never do.
+`DSH_USD_INSTALL_DIR` overrides the lookup when a machine has more than one profile.
+The resolved directory is validated once at startup — a path that does not exist is
+refused instead of failing on every rebuild — and `DSH_USD_DEBOUNCE_MS` is validated
+rather than turning a typo into a build per filesystem event. Host-half changes also
+rewrite `lib/index.js`, but Node's ESM cache needs an app restart for those;
+front-end edits never do.
 
 ### Updating a local checkout
 
