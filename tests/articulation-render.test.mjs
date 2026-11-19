@@ -413,6 +413,32 @@ async function waitAllLabel(context, expected) {
   assert.fail('the All open/All close button never read "' + expected + '"')
 }
 
+/** The prim path the panel reports as selected, or '' when nothing is. */
+async function selectedPath(context) {
+  const value = await context.page.locator('[data-usd-preview]').getAttribute('data-usd-selected')
+  return value ?? ''
+}
+
+/**
+ * Clear the selection with Escape and prove the panel agrees.
+ *
+ * Every pixel comparison below is about the pose, and a selected part is tinted —
+ * a tint over the model would fail a "the rest pose came back" diff that is
+ * otherwise exact. Clearing first is therefore part of the measurement, not a
+ * convenience: it also makes each restored check a free regression guard for the
+ * Escape binding.
+ * @returns the selected path before the key was pressed.
+ */
+async function clearSelection(context) {
+  const before = await selectedPath(context)
+  if (before === '') return before
+  await context.page.keyboard.press('Escape')
+  await context.page.waitForTimeout(250)
+  assert.equal(await selectedPath(context), '', 'Escape did not clear the selection (' + before + ' stayed selected)')
+  assert.equal(await context.page.locator('[data-usd-picked]').count(), 0, 'Escape left the picked name in the panel')
+  return before
+}
+
 // ── per-fixture interaction scripts ────────────────────────────────────────
 
 /**
@@ -424,10 +450,12 @@ async function runRevolute(context, state) {
   const { closed, declaredParts, declaredColliders } = state
   let restoredChecks = 0
   const expectRestored = async (label) => {
+    const cleared = await clearSelection(context)
     const shot = await snap(label)
     const delta = await probe.difference(closed, shot, 24)
     assert.ok(delta.changed < delta.total * 0.005,
-      label + ': the rest pose was not restored (' + delta.changed + '/' + delta.total + ' pixels differ)')
+      label + ': the rest pose was not restored (' + delta.changed + '/' + delta.total + ' pixels differ'
+      + (cleared === '' ? ')' : ', after clearing the selection of ' + cleared + ')'))
     restoredChecks += 1
   }
   /** Click a point found from the current frame; return whether it animated. */
@@ -441,18 +469,44 @@ async function runRevolute(context, state) {
     return undefined
   }
 
-  // 1. click the part -> open, pixels change.
+  // 1. click the part -> open, pixels change, and the part is highlighted.
   const open = await clickPart(closed, 'door open')
   assert.ok(open !== undefined, 'doors: no candidate click on the model pulled an animation')
-  const openShot = await snap('part-click-open')
-  const opened = await probe.difference(closed, openShot, 24)
+  const openTinted = await snap('part-click-open')
+  const opened = await probe.difference(closed, openTinted, 24)
   assert.ok(opened.changed > opened.total * 0.002, 'door: the part click changed only ' + opened.changed + ' pixels')
   assert.ok(opened.peak > 40, 'door: the click frames are nearly identical (peak delta ' + opened.peak + ')')
   assert.ok(open.pulled >= 12, 'door: the click pulled only ' + open.pulled + ' draw calls')
+  // The click that drives a joint also selects the part: the tint is what says
+  // *which* part the frame is showing.
+  const drivenPath = await selectedPath(context)
+  assert.ok(drivenPath.startsWith('/'), 'door: the click that opened the part selected nothing, got "' + drivenPath + '"')
+  state.drivenPath = drivenPath
+  // The pose is what the rest of this script compares, so the tint comes off
+  // before the measurement — and taking it off is itself asserted.
+  await clearSelection(context)
+  const openPose = await snap('part-click-open-unselected')
+  const openPoseDelta = await probe.difference(closed, openPose, 24)
+  assert.ok(openPoseDelta.changed > openPoseDelta.total * 0.002, 'door: the part did not actually open')
+  // The tint is exactly what the selection adds: the same pose, drawn twice.
+  const tintCost = await probe.difference(openPose, openTinted, 12)
+  assert.ok(tintCost.changed > 100, 'door: the selection tint changed only ' + tintCost.changed + ' pixels')
 
   // 2. clicking the part in its new position closes it again.
-  const closedAgain = await clickPart(openShot, 'door close')
+  const closedAgain = await clickPart(openPose, 'door close')
   assert.ok(closedAgain !== undefined, 'door: no candidate click on the moved model pulled an animation')
+  // That click selected the part again, at the *new* pose. Driving the joint home
+  // under a live selection is what proves the tint is parented to the part: it
+  // travels with it, and leaves nothing behind where the part used to be.
+  const stillSelected = await selectedPath(context)
+  assert.ok(stillSelected.startsWith('/'), 'door: the closing click selected nothing, got "' + stillSelected + '"')
+  await clickControl(context, 'data-usd-parts-home')
+  await waitSettled(page)
+  const tintAtRest = await snap('tint-followed-part-home')
+  const tintAtRestDelta = await probe.difference(closed, tintAtRest, 24)
+  assert.ok(tintAtRestDelta.changed > 100, 'door: the tint did not follow the part home (only '
+    + tintAtRestDelta.changed + ' pixels differ from the plain rest pose)')
+  await clearSelection(context)
   await expectRestored('part-click-close')
 
   // 3. Home restores the rest pose deterministically.
@@ -499,11 +553,17 @@ async function runRevolute(context, state) {
   }
 
   // 7. A blank click on the corner changes nothing: no draws, same pixels, same
-  //    DOM structure.
+  //    DOM structure. With a selection live it also deselects — that is the
+  //    "click the background to clear the highlight" half of the contract — so
+  //    the two are asserted separately rather than one hiding the other.
+  await waitSettled(page)
+  const box = await context.canvas.boundingBox()
+  // A blank click with nothing selected: the frame, the draw counter and the DOM
+  // all have to stay exactly as they were.
+  await clearSelection(context)
   await waitSettled(page)
   const drawsBefore = await context.draws()
   const beforeBlank = await snap('blank-before')
-  const box = await context.canvas.boundingBox()
   await page.mouse.click(box.x + 6, box.y + box.height - 6)
   await page.waitForTimeout(500)
   await waitSettled(page).catch(() => undefined)
@@ -514,6 +574,23 @@ async function runRevolute(context, state) {
   assert.equal(blankDelta.changed, 0, 'door: a blank click changed ' + blankDelta.changed + ' pixels')
   assert.equal(Number(await page.locator('[data-usd-preview]').getAttribute('data-usd-parts')), declaredParts,
     'door: a blank click changed the reported part count')
+  // A blank click *with* a selection: the tint goes, and the pose is left where the
+  // click that selected the part put it — a background click is a deselect, not a
+  // reset. Home after it is what returns the stage.
+  const selectedBefore = await selectedPath(context)
+  assert.equal(selectedBefore, '', 'door: the blank-click check ran with a selection live')
+  const reopen = await clickPart(closed, 'door blank-click deselect setup')
+  assert.ok(reopen !== undefined, 'door: the deselect setup click did not open the part')
+  assert.ok((await selectedPath(context)).startsWith('/'), 'door: the setup click selected nothing')
+  await page.mouse.click(box.x + 6, box.y + box.height - 6)
+  await page.waitForTimeout(600)
+  assert.equal(await selectedPath(context), '', 'door: a click on the background left the part selected')
+  await waitSettled(page)
+  assert.equal(Number(await page.locator('[data-usd-preview]').getAttribute('data-usd-parts')), declaredParts,
+    'door: a background click changed the reported part count')
+  await clickControl(context, 'data-usd-parts-home')
+  await waitSettled(page)
+  await expectRestored('background-click-deselect')
 
   state.restoredChecks = restoredChecks
   state.allOpenChanged = allOpen.changed
@@ -535,28 +612,48 @@ async function runMixed(context, state) {
 
   // 1. Segment the lit model into clusters: the revolute leaf, the prismatic
   //    tray, the fixed plate and the small base are spatially separated.
+  //    Every click also selects what it hit, so each measurement clears first:
+  //    the pictures below are about which part moved, and a tint over a part
+  //    would be mistaken for one.
   const clusters = await maskClusters(closed, 4)
   assert.ok(clusters.length >= 2, 'mixed: the closed frame yielded only ' + clusters.length + ' model cluster(s)')
   const drivable = []
   const staticClicks = []
+  const selectedByCluster = []
   for (const cluster of clusters) {
     const result = await clickAndWait(context, { x: cluster.x, y: cluster.y })
+    const clusterSelection = await selectedPath(context)
     if (result.animated === true) {
       const shot = await snap('cluster-open')
       const delta = await probe.difference(closed, shot, 24)
-      drivable.push({ point: { x: cluster.x, y: cluster.y }, shot, delta, pulled: result.pulled })
+      drivable.push({ point: { x: cluster.x, y: cluster.y }, shot, delta, pulled: result.pulled, selection: clusterSelection })
       // Put it back before classifying the next cluster, so every picture below
       // compares against the same baseline.
       await clickControl(context, 'data-usd-parts-home')
       await waitSettled(page)
+      await clearSelection(context)
       const restore = await probe.difference(closed, await snap('cluster-restored'), 24)
       assert.ok(restore.changed < restore.total * 0.005, 'mixed: Home after a cluster click did not restore the rest pose')
     } else {
+      // A click on a static body still selects it: the frame is tinted, the pose
+      // is not. What the static check is about is the pose and the draw count, so
+      // it measures them with the tint cleared.
+      selectedByCluster.push(clusterSelection)
+      await clearSelection(context)
       const shot = await snap('cluster-static')
       const delta = await probe.difference(closed, shot, 24)
-      staticClicks.push({ point: { x: cluster.x, y: cluster.y }, delta, pulled: result.pulled })
+      staticClicks.push({ point: { x: cluster.x, y: cluster.y }, delta, pulled: result.pulled, selection: clusterSelection })
     }
   }
+  // Both kinds of body are named when clicked: clicking a part is how a user says
+  // "this one", whether or not it can be driven.
+  for (const entry of [...drivable, ...staticClicks]) {
+    assert.ok(
+      entry.selection.startsWith('/'),
+      'mixed: a click on a body selected nothing (got "' + entry.selection + '")',
+    )
+  }
+  state.selectedByCluster = selectedByCluster.length
   // Distinct parts: two clusters may land on the same large part.
   const distinct = []
   for (const candidate of drivable) {
@@ -587,15 +684,23 @@ async function runMixed(context, state) {
 
   // 2. Independence: open A, then B on top of it. B's own frame change has to be
   //    the same as when B was opened from the rest pose — A's state cannot leak.
+  //    Every click selects the part it drove, so each comparison is taken with the
+  //    tint cleared: these pictures are about the pose, not the annotation.
+  const snapPose = async (label) => {
+    await clearSelection(context)
+    await waitSettled(page).catch(() => undefined)
+    return snap(label)
+  }
   assert.equal(await allLabel(context), 'Open all', 'mixed: the initial All label is not "Open all"')
   const aClick = await clickAndWait(context, partA.point)
   assert.equal(aClick.animated, true, 'mixed: part A stopped animating')
-  const aShot = await snap('part-a-open')
+  assert.ok((await selectedPath(context)).startsWith('/'), 'mixed: clicking part A selected nothing')
+  const aShot = await snapPose('part-a-open')
   const aDelta = await probe.difference(closed, aShot, 24)
   assert.ok(aDelta.changed > Math.max(200, aDelta.total * 0.001), 'mixed: opening part A changed only ' + aDelta.changed + ' pixels')
   const bOnA = await clickAndWait(context, partB.point)
   assert.equal(bOnA.animated, true, 'mixed: part B stopped animating')
-  const abShot = await snap('part-a-b-open')
+  const abShot = await snapPose('part-a-b-open')
   const bOnADelta = await probe.difference(aShot, abShot, 24)
   assert.ok(bOnADelta.changed > Math.max(200, bOnADelta.total * 0.001), 'mixed: opening part B changed only ' + bOnADelta.changed + ' pixels')
   const bCentroid = Math.hypot(
@@ -610,7 +715,7 @@ async function runMixed(context, state) {
   // 3. Home restores the whole stage after both parts were driven.
   await clickControl(context, 'data-usd-parts-home')
   await waitSettled(page)
-  const restoredShot = await snap('home-after-both')
+  const restoredShot = await snapPose('home-after-both')
   const restored = await probe.difference(closed, restoredShot, 24)
   assert.ok(restored.changed < restored.total * 0.005,
     'mixed: Home after both parts did not restore the rest pose (' + restored.changed + ' pixels)')
@@ -625,7 +730,7 @@ async function runMixed(context, state) {
   await clickControl(context, 'data-usd-parts-toggle')
   await waitAllLabel(context, 'Open all')
   await waitSettled(page)
-  const allClosedShot = await snap('all-close')
+  const allClosedShot = await snapPose('all-close')
   const allClosed = await probe.difference(closed, allClosedShot, 24)
   assert.ok(allClosed.changed < allClosed.total * 0.005, 'mixed: All close did not restore the rest pose')
 
@@ -642,7 +747,7 @@ async function runMixed(context, state) {
   void rapidShot
   await clickControl(context, 'data-usd-parts-home')
   await waitSettled(page)
-  const rapidRestored = await probe.difference(closed, await snap('rapid-home-restored'), 24)
+  const rapidRestored = await probe.difference(closed, await snapPose('rapid-home-restored'), 24)
   assert.ok(rapidRestored.changed < rapidRestored.total * 0.005,
     'mixed: five rapid clicks were not reversible (' + rapidRestored.changed + ' pixels differ after Home)')
 
@@ -660,8 +765,10 @@ async function runMixed(context, state) {
     state.colliderDiff = colliderDiff
   }
 
-  // 7. A blank click changes nothing.
+  // 7. A blank click changes nothing; with a selection live it deselects.
   await waitSettled(page)
+  await clearSelection(context)
+  await waitSettled(page).catch(() => undefined)
   const drawsBefore = await context.draws()
   const blankBefore = await snap('blank-before')
   await page.mouse.click(box.x + 6, box.y + box.height - 6)
@@ -673,6 +780,18 @@ async function runMixed(context, state) {
   assert.equal(blankDelta.changed, 0, 'mixed: a blank click changed ' + blankDelta.changed + ' pixels')
   assert.equal(Number(await page.locator('[data-usd-preview]').getAttribute('data-usd-parts')), declaredParts,
     'mixed: a blank click changed the reported part count')
+  // A background click clears a live selection without moving the pose.
+  await clickAndWait(context, partA.point)
+  assert.ok((await selectedPath(context)).startsWith('/'), 'mixed: the deselect setup click selected nothing')
+  await clickControl(context, 'data-usd-parts-home')
+  await waitSettled(page)
+  await page.mouse.click(box.x + 6, box.y + box.height - 6)
+  await page.waitForTimeout(600)
+  assert.equal(await selectedPath(context), '', 'mixed: a click on the background left a part selected')
+  await waitSettled(page)
+  const backgroundRestored = await probe.difference(closed, await snap('background-click-deselect'), 24)
+  assert.ok(backgroundRestored.changed < backgroundRestored.total * 0.005,
+    'mixed: a background click did not restore the rest pose')
 
   state.parts = distinct.length
   state.bothOpenChanged = allOpen.changed
@@ -689,6 +808,8 @@ async function runChain(context, state) {
   const { page, snap } = context
   const { closed, declaredParts } = state
   const restored = async (label) => {
+    await clearSelection(context)
+    await waitSettled(page).catch(() => undefined)
     const delta = await probe.difference(closed, await snap(label), 24)
     assert.ok(delta.changed < delta.total * 0.005, 'chain: ' + label + ' did not restore the rest pose')
     return delta
@@ -706,7 +827,8 @@ async function runChain(context, state) {
   await waitSettled(page)
   await restored('all-close')
 
-  // A single click on a link drives its joint, and Home puts the chain back.
+  // A single click on a link drives its joint, selects the link, and Home puts the
+  // chain back.
   const candidates = await probe.modelPoints(closed, 90)
   assert.ok(candidates.length > 0, 'chain: no lit model to click')
   let clicked = false
@@ -714,10 +836,15 @@ async function runChain(context, state) {
     const result = await clickAndWait(context, point)
     if (result.animated === true) {
       clicked = true
+      assert.ok(
+        (await selectedPath(context)).startsWith('/'),
+        'chain: the click that drove a link selected nothing',
+      )
       break
     }
     await clickControl(context, 'data-usd-parts-home')
     await page.waitForTimeout(200)
+    await clearSelection(context)
   }
   assert.equal(clicked, true, 'chain: no candidate click on the chain pulled an animation')
   const oneShot = await snap('link-click-open')
@@ -743,6 +870,7 @@ async function runRealAsset(context, state) {
   assert.ok(allOpen.changed > 0, 'real asset: All open changed no pixels')
   await clickControl(context, 'data-usd-parts-home')
   await waitSettled(page)
+  await clearSelection(context)
   const restored = await probe.difference(closed, await snap('home-restored'), 24)
   assert.ok(restored.changed < restored.total * 0.01, 'real asset: Home did not restore the rest pose')
   state.parts = declaredParts
@@ -801,7 +929,8 @@ try {
       + (state.aChanged === undefined ? '' : '  parts A/B ' + state.aChanged + '/' + state.bChanged + ' px')
       + (state.partDistance === undefined ? '' : '  apart ' + state.partDistance.toFixed(0) + ' px')
       + (state.allOpenChanged === undefined ? '' : '  all-open ' + state.allOpenChanged + ' px')
-      + (state.oneChanged === undefined ? '' : '  link click ' + state.oneChanged + ' px'),
+      + (state.oneChanged === undefined ? '' : '  link click ' + state.oneChanged + ' px')
+      + (state.drivenPath === undefined ? '' : '  selected ' + state.drivenPath),
     )
   }
 } finally {

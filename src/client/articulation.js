@@ -94,6 +94,7 @@
  */
 import * as THREE from 'three'
 import { USDCParser } from 'three/examples/jsm/loaders/usd/USDCParser.js'
+import { AsciiLayerReader, FALLBACK_OP_ORDER, mergePrim, valueAtSpan } from './layer-text.js'
 
 /**
  * @typedef {object} ArticulationBody
@@ -171,6 +172,9 @@ const FIELD_SET_END = -1
 /** `TokenListOp`, the crate type three's parser deliberately skips. */
 const TOKEN_LIST_OP = 32
 
+/** The crate `variability` enum's "uniform" value (crateDataTypes.h). */
+const VARIABILITY_UNIFORM = 1
+
 /** Crate quaternions are stored (i, j, k, real); USD text writes (real, i, j, k). */
 const QUATERNION_TYPES = new Set(['quatf', 'quatd', 'quath'])
 
@@ -211,22 +215,6 @@ const PHYSICS_ATTRIBUTES = new Set([
   'purpose',
 ])
 const GEOMETRY_ATTRIBUTES = new Set(['points', 'faceVertexCounts', 'faceVertexIndices'])
-
-/** Statement modifiers that may precede a type or a relationship. */
-const MODIFIERS = new Set(['custom', 'uniform', 'varying', 'optional', 'prepend', 'append', 'add', 'delete', 'reorder', 'config'])
-
-/** Metadata keys whose values are not attributes and are consumed whole. */
-const STATEMENT_KEYS = new Set([
-  'inherits', 'specializes', 'references', 'payload', 'subLayers', 'nameChildren', 'variantSets',
-  'doc', 'kind', 'customData', 'defaultPrim', 'metersPerUnit', 'upAxis', 'endTimeCode', 'startTimeCode',
-  'timeCodesPerSecond', 'comment', 'fallbackPrimTypes', 'apiSchemas',
-])
-
-/** xformOp suffixes applied when a layer authors ops but no `xformOpOrder`. */
-const FALLBACK_OP_ORDER = [
-  'xformOp:translate', 'xformOp:orient', 'xformOp:rotateX', 'xformOp:rotateY', 'xformOp:rotateZ',
-  'xformOp:scale', 'xformOp:transform',
-]
 
 /** A collider segment in a prim path, used when no API schema marks the prim. */
 const COLLIDER_SEGMENT = 'collision'
@@ -512,544 +500,10 @@ function bakePositions(positions, matrix) {
 
 // ── ASCII layers ───────────────────────────────────────────────────────────
 
-/**
- * A focused reader for one ASCII layer.
- *
- * USD text offers a full grammar; this reader implements the subset that
- * describes stage structure (prims, metadata, relationships, attributes) and
- * skips every value it does not need without allocating it. That is what keeps
- * a scene with hundreds of thousands of mesh points cheap to scan.
- */
-class AsciiLayerReader {
-  constructor(text) {
-    this.text = text
-    this.at = 0
-    this.prims = new Map()
-  }
+// The text reader lives in its own module: the prim-details reader parses the
+// same grammar (declared types, metadata, relationships) and duplicating a
+// lexer would let the two disagree about the same file.
 
-  /** Skip whitespace, line comments and block comments. */
-  skip() {
-    const text = this.text
-    for (;;) {
-      const char = text[this.at]
-      if (char === undefined) return
-      if (char === ' ' || char === '\t' || char === '\r' || char === '\n') {
-        this.at += 1
-        continue
-      }
-      if (char === '#') {
-        const end = text.indexOf('\n', this.at)
-        this.at = end < 0 ? text.length : end + 1
-        continue
-      }
-      if (char === '/' && text[this.at + 1] === '/') {
-        const end = text.indexOf('\n', this.at)
-        this.at = end < 0 ? text.length : end + 1
-        continue
-      }
-      if (char === '/' && text[this.at + 1] === '*') {
-        const end = text.indexOf('*/', this.at + 2)
-        this.at = end < 0 ? text.length : end + 2
-        continue
-      }
-      return
-    }
-  }
-
-  /** Read one bare token: a keyword, a type name, an attribute name or a number. */
-  word() {
-    const text = this.text
-    const start = this.at
-    let at = start
-    while (at < text.length) {
-      const char = text[at]
-      if (char === ' ' || char === '\t' || char === '\r' || char === '\n') break
-      if (char === '{' || char === '}' || char === '(' || char === ')' || char === '[' || char === ']') break
-      if (char === ',' || char === '=' || char === ';' || char === '"' || char === "'" || char === '#') break
-      if (char === '<' || char === '>' || char === '@') break
-      at += 1
-    }
-    this.at = at
-    return text.slice(start, at)
-  }
-
-  /** Read a quoted string, including the triple-quoted form USD allows. */
-  string() {
-    const text = this.text
-    const quote = text[this.at]
-    const triple = quote.repeat(3)
-    if (text.startsWith(triple, this.at)) {
-      const end = text.indexOf(triple, this.at + 3)
-      const value = text.slice(this.at + 3, end < 0 ? text.length : end)
-      this.at = end < 0 ? text.length : end + 3
-      return value
-    }
-    let at = this.at + 1
-    let value = ''
-    while (at < text.length) {
-      const char = text[at]
-      if (char === '\\' && at + 1 < text.length) {
-        const next = text[at + 1]
-        value += next === 'n' ? '\n' : next === 't' ? '\t' : next
-        at += 2
-        continue
-      }
-      if (char === quote) {
-        at += 1
-        break
-      }
-      value += char
-      at += 1
-    }
-    this.at = at
-    return value
-  }
-
-  /** Read `<path>`. */
-  pathValue() {
-    const text = this.text
-    this.at += 1
-    const end = text.indexOf('>', this.at)
-    if (end < 0) {
-      this.at = text.length
-      return ''
-    }
-    const value = text.slice(this.at, end).trim()
-    this.at = end + 1
-    return value
-  }
-
-  /** Read an `@asset@` reference. */
-  assetValue() {
-    const text = this.text
-    this.at += 1
-    let value = ''
-    while (this.at < text.length) {
-      const char = text[this.at]
-      if (char === '@') {
-        if (text[this.at + 1] === '@') {
-          value += '@'
-          this.at += 2
-          continue
-        }
-        this.at += 1
-        return value
-      }
-      value += char
-      this.at += 1
-    }
-    return value
-  }
-
-  /** Read a value, materialising it. */
-  value() {
-    this.skip()
-    const char = this.text[this.at]
-    if (char === undefined) return undefined
-    if (char === '(') return this.tuple()
-    if (char === '[') return this.array()
-    if (char === '{') return this.dictionary()
-    if (char === '"' || char === "'") return this.string()
-    if (char === '<') return this.pathValue()
-    if (char === '@') return this.assetValue()
-    return this.atom()
-  }
-
-  /** Read a parenthesised tuple as an array of values. */
-  tuple() {
-    const out = []
-    this.at += 1
-    for (;;) {
-      this.skip()
-      const char = this.text[this.at]
-      if (char === undefined) return out
-      if (char === ')') {
-        this.at += 1
-        return out
-      }
-      if (char === ',') {
-        this.at += 1
-        continue
-      }
-      const before = this.at
-      const value = this.value()
-      if (value !== undefined) out.push(value)
-      if (this.at === before) this.at += 1
-    }
-  }
-
-  /** Read a bracketed array. */
-  array() {
-    const out = []
-    this.at += 1
-    for (;;) {
-      this.skip()
-      const char = this.text[this.at]
-      if (char === undefined) return out
-      if (char === ']') {
-        this.at += 1
-        return out
-      }
-      if (char === ',') {
-        this.at += 1
-        continue
-      }
-      const before = this.at
-      const value = this.value()
-      if (value !== undefined) out.push(value)
-      if (this.at === before) this.at += 1
-    }
-  }
-
-  /** Read a dictionary value; only the keys are kept. */
-  dictionary() {
-    const out = {}
-    this.at += 1
-    for (;;) {
-      this.skip()
-      const char = this.text[this.at]
-      if (char === undefined) return out
-      if (char === '}') {
-        this.at += 1
-        return out
-      }
-      if (char === ',') {
-        this.at += 1
-        continue
-      }
-      const before = this.at
-      const key = char === '"' || char === "'" ? this.string() : this.word()
-      this.skip()
-      if (this.text[this.at] === '=' || this.text[this.at] === ':') this.at += 1
-      out[key] = this.value()
-      if (this.at === before) this.at += 1
-    }
-  }
-
-  /** Read a bare atom: number, boolean, None, or a token. */
-  atom() {
-    const raw = this.word()
-    if (raw === '') return undefined
-    if (raw === 'true') return true
-    if (raw === 'false') return false
-    if (raw === 'None' || raw === 'none' || raw === 'null') return null
-    if (/^[-+]?(\d|\.\d)/.test(raw)) {
-      const number = Number(raw)
-      if (Number.isFinite(number)) return number
-    }
-    return raw
-  }
-
-  /** Skip one value without materialising it. */
-  skipValue() {
-    this.skip()
-    const text = this.text
-    const char = text[this.at]
-    if (char === undefined) return
-    if (char === '(') return this.skipBalanced('(', ')')
-    if (char === '[') return this.skipBalanced('[', ']')
-    if (char === '{') return this.skipBalanced('{', '}')
-    if (char === '"' || char === "'") {
-      this.string()
-      return
-    }
-    if (char === '<') {
-      const end = text.indexOf('>', this.at)
-      this.at = end < 0 ? text.length : end + 1
-      return
-    }
-    if (char === '@') {
-      this.assetValue()
-      return
-    }
-    const before = this.at
-    this.word()
-    if (this.at === before) this.at += 1
-  }
-
-  /** Skip a balanced block, honouring strings and comments inside it. */
-  skipBalanced(open, close) {
-    const text = this.text
-    let depth = 0
-    while (this.at < text.length) {
-      const char = text[this.at]
-      if (char === '"' || char === "'") {
-        this.string()
-        continue
-      }
-      if (char === '#' && open !== '"') {
-        const end = text.indexOf('\n', this.at)
-        this.at = end < 0 ? text.length : end + 1
-        continue
-      }
-      if (char === open) depth += 1
-      else if (char === close) {
-        depth -= 1
-        if (depth === 0) {
-          this.at += 1
-          return
-        }
-      }
-      this.at += 1
-    }
-  }
-
-  /** Consume an `[]` array type suffix when one is present. */
-  arraySuffix() {
-    this.skip()
-    if (this.text[this.at] !== '[') return false
-    let at = this.at + 1
-    while (at < this.text.length && this.text[at] !== ']') at += 1
-    this.at = at + 1
-    return true
-  }
-
-  /** Read one layer: header, layer metadata, then the prim tree. */
-  read() {
-    this.skip()
-    if (this.text.startsWith('#usda', this.at)) {
-      const end = this.text.indexOf('\n', this.at)
-      this.at = end < 0 ? this.text.length : end + 1
-    }
-    this.body('', undefined)
-    return this.prims
-  }
-
-  /** Read prims and attributes until the current block closes (or the file ends). */
-  body(parentPath, prim) {
-    for (;;) {
-      this.skip()
-      const text = this.text
-      if (this.at >= text.length) return
-      const char = text[this.at]
-      if (char === '}') {
-        this.at += 1
-        return
-      }
-      if (char === '(') {
-        this.metadata(prim)
-        continue
-      }
-      if (char === ';' || char === ',') {
-        this.at += 1
-        continue
-      }
-      if (char === '"' || char === "'") {
-        // A bare string is metadata this reader does not model.
-        this.string()
-        continue
-      }
-      const before = this.at
-      const word = this.word()
-      if (word === '') {
-        this.at += 1
-        continue
-      }
-      if (word === 'def' || word === 'over' || word === 'class') {
-        this.prim(word, parentPath)
-        continue
-      }
-      if (word === 'rel') {
-        this.relationship(prim)
-        continue
-      }
-      if (word === 'variantSet' || word === 'variantSets') {
-        this.skipVariantSet()
-        continue
-      }
-      if (MODIFIERS.has(word)) continue
-      if (STATEMENT_KEYS.has(word)) {
-        this.skipAssignment()
-        continue
-      }
-      this.attribute(prim, word)
-      if (this.at === before) this.at += 1
-    }
-  }
-
-  /** Consume a `variantSet` block; variants are a composition state the preview resolves elsewhere. */
-  skipVariantSet() {
-    this.skip()
-    if (this.text[this.at] === '"' || this.text[this.at] === "'") this.string()
-    this.skip()
-    if (this.text[this.at] === '=') this.at += 1
-    this.skip()
-    if (this.text[this.at] === '{') this.skipBalanced('{', '}')
-    else this.skipValue()
-  }
-
-  /** Consume `= value` when one follows the key just read. */
-  skipAssignment() {
-    this.skip()
-    const char = this.text[this.at]
-    if (char === '=') {
-      this.at += 1
-      this.skipValue()
-      return
-    }
-    if (char === '(' || char === '{' || char === '[' || char === '"' || char === "'" || char === '<' || char === '@') {
-      this.skipValue()
-    }
-  }
-
-  /** Read a prim header and body, registering the prim under its absolute path. */
-  prim(specifier, parentPath) {
-    this.skip()
-    let type = ''
-    let name = ''
-    const char = this.text[this.at]
-    if (char === '"' || char === "'") {
-      name = this.string()
-    } else {
-      type = this.word()
-      this.skip()
-      const after = this.text[this.at]
-      if (after === '"' || after === "'") name = this.string()
-    }
-    if (name === '') name = type === '' ? 'Prim' : type
-    const path = parentPath === '' ? '/' + name : parentPath + '/' + name
-    const prim = {
-      path,
-      type,
-      apiSchemas: [],
-      attrs: Object.create(null),
-      rels: Object.create(null),
-      spans: Object.create(null),
-      text: this.text,
-    }
-    this.skip()
-    if (this.text[this.at] === '(') this.metadata(prim)
-    this.skip()
-    if (this.text[this.at] === '{') {
-      this.at += 1
-      this.body(path, prim)
-    }
-    const existing = this.prims.get(path)
-    if (existing === undefined) this.prims.set(path, prim)
-    else mergePrim(existing, prim, specifier)
-  }
-
-  /** Read prim metadata: `apiSchemas` is kept, everything else is consumed. */
-  metadata(prim) {
-    this.at += 1
-    for (;;) {
-      this.skip()
-      const text = this.text
-      if (this.at >= text.length) return
-      const char = text[this.at]
-      if (char === ')') {
-        this.at += 1
-        return
-      }
-      if (char === ',') {
-        this.at += 1
-        continue
-      }
-      if (char === '(' || char === '{' || char === '[') {
-        this.skipValue()
-        continue
-      }
-      const before = this.at
-      const word = this.word()
-      if (word === '') {
-        this.at += 1
-        if (this.at === before) return
-        continue
-      }
-      if (MODIFIERS.has(word)) continue
-      if (word === 'apiSchemas') {
-        this.skip()
-        if (text[this.at] === '=') {
-          this.at += 1
-          const value = this.value()
-          if (prim !== undefined && Array.isArray(value)) {
-            for (const entry of value) {
-              if (typeof entry === 'string' && entry !== '') prim.apiSchemas.push(entry)
-            }
-          }
-        }
-        continue
-      }
-      this.skipAssignment()
-    }
-  }
-
-  /** Read a relationship: `rel name = <path>` or a list of paths. */
-  relationship(prim) {
-    this.skip()
-    const name = this.word()
-    this.skip()
-    if (this.text[this.at] !== '=') {
-      this.skipValue()
-      return
-    }
-    this.at += 1
-    const value = this.value()
-    if (prim === undefined || name === '') return
-    const targets = []
-    const collect = (entry) => {
-      if (typeof entry === 'string' && entry.startsWith('/')) targets.push(entry)
-    }
-    if (Array.isArray(value)) value.forEach(collect)
-    else collect(value)
-    prim.rels[name] = targets
-  }
-
-  /**
-   * Read an attribute statement. The type token has already been consumed;
-   * `type` is empty for the typeless form list-op modifiers allow.
-   */
-  attribute(prim, type) {
-    this.skip()
-    if (this.arraySuffix()) this.skip()
-    let name = this.word()
-    this.skip()
-    if (this.text[this.at] !== '=') {
-      // A typeless form: the word just read was the name after all.
-      this.skipValue()
-      return
-    }
-    this.at += 1
-    if (prim === undefined || name === '') {
-      this.skipValue()
-      return
-    }
-    this.attributeValue(prim, name)
-  }
-
-  /** Keep the attributes this module needs; record geometry spans for later. */
-  attributeValue(prim, name) {
-    if (GEOMETRY_ATTRIBUTES.has(name)) {
-      const start = this.at
-      this.skipValue()
-      prim.spans[name] = [start, this.at]
-      return
-    }
-    const wanted = PHYSICS_ATTRIBUTES.has(name) || name.startsWith('xformOp') || name.startsWith('simready:')
-    if (!wanted) {
-      this.skipValue()
-      return
-    }
-    prim.attrs[name] = this.value()
-  }
-}
-
-/** Merge a later spec of the same prim path into the earlier one. */
-function mergePrim(into, from, specifier) {
-  if (specifier !== 'over' && into.type === '' && from.type !== '') into.type = from.type
-  for (const schema of from.apiSchemas) {
-    if (!into.apiSchemas.includes(schema)) into.apiSchemas.push(schema)
-  }
-  for (const key of Object.keys(from.attrs)) {
-    if (into.attrs[key] === undefined) into.attrs[key] = from.attrs[key]
-  }
-  for (const key of Object.keys(from.rels)) {
-    if (into.rels[key] === undefined) into.rels[key] = from.rels[key]
-  }
-  for (const key of Object.keys(from.spans)) {
-    if (into.spans[key] === undefined) into.spans[key] = from.spans[key]
-  }
-}
 
 // ── crate layers ───────────────────────────────────────────────────────────
 
@@ -1216,10 +670,14 @@ function readCrateLayer(bytes) {
       prims.set(path, {
         path,
         type: typeof fields.typeName === 'string' ? fields.typeName : '',
+        specifier: specifierOf(fields.specifier),
         apiSchemas: apiSchemas === undefined ? [] : (apiSchemas.get(path) ?? []),
         attrs: Object.create(null),
+        attrTypes: Object.create(null),
+        attrFlags: Object.create(null),
         rels: Object.create(null),
         spans: Object.create(null),
+        meta: cratePrimMeta(fields),
         text: undefined,
       })
     } else if (spec.specType === SPEC_ATTRIBUTE || spec.specType === SPEC_RELATIONSHIP) {
@@ -1238,6 +696,13 @@ function readCrateLayer(bytes) {
       const targets = Array.isArray(fields.targetPaths) ? fields.targetPaths : []
       owner.rels[name] = targets.filter(target => typeof target === 'string' && target.startsWith('/'))
     } else if (spec.specType === SPEC_ATTRIBUTE) {
+      // The declared type and the `custom` / `uniform` flags are recorded for
+      // every attribute; the value only when the reader downstream wants it.
+      if (typeof fields.typeName === 'string' && fields.typeName !== '') owner.attrTypes[name] = fields.typeName
+      const flags = {}
+      if (fields.custom === true) flags.custom = true
+      if (fields.variability === VARIABILITY_UNIFORM) flags.uniform = true
+      if (Object.keys(flags).length > 0) owner.attrFlags[name] = flags
       // An inlined vector was handed back as its raw payload by three; use the
       // decoded components instead of letting a scalar be read as a transform.
       const repaired = inlinedValues.get(path)
@@ -1255,10 +720,39 @@ function readCrateLayer(bytes) {
   return { prims, warnings: [] }
 }
 
+/**
+ * The prim-level metadata a crate spec carries.
+ *
+ * `specifier` is a small enum (0 = def, 1 = over, 2 = class), `active` and
+ * `instanceable` are booleans, and `customData` is a decoded dictionary.
+ * @param fields - one prim spec's decoded fields.
+ * @returns the `meta` record every prim carries (see `layer-text.js`).
+ */
+function cratePrimMeta(fields) {
+  const meta = { variantSets: [] }
+  if (fields.active === false) meta.active = false
+  if (fields.instanceable === true) meta.instanceable = true
+  if (typeof fields.documentation === 'string' && fields.documentation !== '') meta.doc = fields.documentation
+  if (typeof fields.displayName === 'string' && fields.displayName !== '') meta.displayName = fields.displayName
+  if (fields.customData !== null && typeof fields.customData === 'object') meta.customData = fields.customData
+  return meta
+}
+
+/** The `specifier` enum of a crate prim spec, spelled the way a layer writes it. */
+function specifierOf(value) {
+  if (value === 1) return 'over'
+  if (value === 2) return 'class'
+  return 'def'
+}
+
 // ── reading a stage ────────────────────────────────────────────────────────
 
-/** Turn the engine's package (Blob per layer) into bytes, in composition order. */
-async function layerBytesOf(sources) {
+/**
+ * Turn the engine's package (Blob per layer) into bytes, in composition order.
+ * @param sources - a Map, an array of `[key, value]` pairs, or a plain object.
+ * @returns one `{ key, bytes }` entry per readable layer.
+ */
+export async function layerBytesOf(sources) {
   const entries = []
   const collect = async (key, value) => {
     let bytes
@@ -1275,7 +769,7 @@ async function layerBytesOf(sources) {
     for (const entry of sources) {
       if (Array.isArray(entry) && entry.length >= 2) await collect(entry[0], entry[1])
     }
-  } else if (typeof sources === 'object') {
+  } else if (typeof sources === 'object' && sources !== null) {
     for (const key of Object.keys(sources)) await collect(key, sources[key])
   }
   return entries
@@ -1296,7 +790,19 @@ function decodeLayer(bytes) {
   // Cheapest rejection there is: a text layer without the word cannot declare
   // a joint. Crates cannot be rejected this way (their token table is LZ2/LZ4).
   if (text.includes('Physics') === false && text.includes('physics:') === false) return undefined
-  return { prims: new AsciiLayerReader(text).read(), text, warnings: [] }
+  const reader = new AsciiLayerReader(text, { keep: keepPhysicsAttribute })
+  return { prims: reader.read(), text, warnings: [], meta: reader.meta }
+}
+
+/**
+ * Whether an ASCII attribute's value is one the articulation reader needs.
+ *
+ * The text reader materialises nothing it is not asked for, which is what keeps a
+ * 90 MiB geometry layer cheap to scan: `points` is recorded as a span and parsed
+ * only for a prim that turned out to be a collider.
+ */
+function keepPhysicsAttribute(name) {
+  return PHYSICS_ATTRIBUTES.has(name) || GEOMETRY_ATTRIBUTES.has(name) || name.startsWith('xformOp') || name.startsWith('simready:')
 }
 
 /** Read the collision arrays a prim carries, from the crate values or its text span. */
@@ -1307,12 +813,7 @@ function colliderGeometryOf(prim) {
   const text = prim.text
   if (typeof text !== 'string' || prim.spans === undefined || prim.spans.points === undefined) return undefined
   const reader = new AsciiLayerReader(text)
-  const read = (name) => {
-    const span = prim.spans[name]
-    if (span === undefined) return undefined
-    reader.at = span[0]
-    return reader.value()
-  }
+  const read = name => valueAtSpan(reader, prim.spans[name])
   return triangulateMesh(read('points'), read('faceVertexCounts'), read('faceVertexIndices'))
 }
 

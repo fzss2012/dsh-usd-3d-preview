@@ -125,12 +125,16 @@ assert.equal(hostRoutes.size, 3, 'the host half registered the asset, health and
 /** Files to draw, and the geometry each must report. */
 const CASES = [
   { path: 'sample.usdz', meshes: 2, match: /Layers: 1/, note: 'package' },
-  { path: 'sample.usda', meshes: 2, match: /Container: usda/, note: 'ASCII + prims', prims: true },
-  { path: 'sample.usdc', meshes: 2, match: /Container: usdc/, note: 'binary crate' },
+  { path: 'sample.usda', meshes: 2, match: /Container: usda/, note: 'ASCII + prims', prims: true, flat: true },
+  // The crate fixture is the parity case for the details panel: the same stage in
+  // a binary container must list the same attributes with the same declared types.
+  { path: 'sample.usdc', meshes: 2, match: /Container: usdc/, note: 'binary crate', prims: true },
   // One quad in a second layer: the case where the bytes alone are not enough.
-  { path: 'refs/unit.usda', meshes: 1, match: /Layers: 2/, note: 'reference chain' },
+  // It is also the details panel's composed-path case: the mesh the click names is
+  // /root/unit/body, while the layer that describes it wrote /root/body.
+  { path: 'refs/unit.usda', meshes: 1, match: /Layers: 2/, note: 'reference chain', prims: true, composed: true },
   // subLayers + reference: an arc three's composer does not implement at all.
-  { path: 'arcs/root.usda', meshes: 2, match: /Layers: 3/, note: 'sublayer + reference' },
+  { path: 'arcs/root.usda', meshes: 2, match: /Layers: 3/, note: 'sublayer + reference', prims: true },
   // PointInstancer: four placements of one prototype; three's composer has no
   // PointInstancer at all, so only the engine path can draw these.
   { path: 'instancer/root.usda', meshes: 4, match: /Layers: 1/, note: 'PointInstancer' },
@@ -296,7 +300,7 @@ const probe = await createPixelProbe(browser)
 const results = []
 try {
   for (const entry of CASES) {
-    const { path, root: caseRoot, absolute, meshes, parts, partsAtLeast, toggle, colliders, pick, prims, match, note, warnings } = entry
+    const { path, root: caseRoot, absolute, meshes, parts, partsAtLeast, toggle, colliders, pick, prims, composed, flat, match, note, warnings } = entry
     const page = await browser.newPage({ viewport: { width: 900, height: 640 } })
     const consoleErrors = []
     page.on('pageerror', error => consoleErrors.push(error?.stack ?? String(error)))
@@ -434,12 +438,155 @@ try {
         await folder.first().click()
         await page.waitForTimeout(120)
       }
+
+      // ── clicking the model selects, and Escape clears ───────────────────
+      // This is the user-facing contract in pixels: the click that names a prim
+      // also tints it, and the animation shows which one. The selection is read
+      // back from `data-usd-selected` and from the frame itself.
+      const unselectedShot = join(artifacts, `${path.replaceAll('/', '_')}-selected-none.png`)
+      await canvas.screenshot({ path: unselectedShot })
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
       await page.waitForTimeout(1000)
       const pickedCount = await page.locator('[data-usd-picked]').count()
       const picked = pickedCount === 0 ? '' : await page.locator('[data-usd-picked]').first().innerText()
       assert.match(picked, /\//, `${path}: a canvas click must name the picked prim (got "${picked}")`)
-      caseShot.prims = { count: primCount, picked }
+      const selectedPath = await page.locator('[data-usd-preview]').getAttribute('data-usd-selected')
+      assert.ok(
+        selectedPath !== null && selectedPath.startsWith('/'),
+        `${path}: a click did not report a selected prim path, got "${selectedPath}"`,
+      )
+      const selectedShot = join(artifacts, `${path.replaceAll('/', '_')}-selected-highlight.png`)
+      await canvas.screenshot({ path: selectedShot })
+      const highlight = await probe.difference(unselectedShot, selectedShot, 12)
+      assert.ok(highlight.changed > 200, `${path}: selecting a prim changed only ${highlight.changed} pixels`)
+      assert.ok(
+        (highlight.blueAfter - highlight.redAfter) > (highlight.blueBefore - highlight.redBefore) + 10,
+        `${path}: the selection is not tinted towards the accent (blue-red `
+          + `${(highlight.blueBefore - highlight.redBefore).toFixed(1)} -> ${(highlight.blueAfter - highlight.redAfter).toFixed(1)})`,
+      )
+      caseShot.selection = { path: selectedPath, highlighted: highlight.changed }
+
+      // Escape clears the tint and the name together, and the frame returns to
+      // exactly the unselected one.
+      await page.keyboard.press('Escape')
+      await page.waitForTimeout(600)
+      assert.equal(
+        await page.locator('[data-usd-preview]').getAttribute('data-usd-selected'),
+        '',
+        `${path}: Escape left a prim selected`,
+      )
+      assert.equal(await page.locator('[data-usd-picked]').count(), 0, `${path}: Escape left the picked name in the panel`)
+      const clearedShot = join(artifacts, `${path.replaceAll('/', '_')}-selected-cleared.png`)
+      await canvas.screenshot({ path: clearedShot })
+      const cleared = await probe.difference(unselectedShot, clearedShot, 12)
+      assert.ok(
+        cleared.changed < cleared.total * 0.002,
+        `${path}: Escape did not restore the frame (${cleared.changed} pixels differ)`,
+      )
+      // The tighter statement: no pixel moved by more than the renderer's own
+      // noise. `peak` is the largest per-channel delta anywhere in the frame, and
+      // a tint that failed to clear shows up in the tens — the software
+      // rasterizer's antialiasing jitter is one or two. A count of changed pixels
+      // alone would either miss a faint leftover tint or trip on that jitter.
+      assert.ok(
+        cleared.peak <= 8,
+        `${path}: clearing the selection left a visible trace (peak channel delta ${cleared.peak})`,
+      )
+
+      // The panel's × is the same undo for a pointer: it is the only affordance
+      // left once the prims panel is closed (the hint carries it too), so it is
+      // clicked here rather than assumed to work because the handler is shared.
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+      await page.waitForTimeout(800)
+      assert.ok(
+        (await page.locator('[data-usd-preview]').getAttribute('data-usd-selected')) !== '',
+        `${path}: the × check ran without a selection`,
+      )
+      await panel.locator('[data-usd-picked-clear]').click()
+      await page.waitForTimeout(600)
+      assert.equal(
+        await page.locator('[data-usd-preview]').getAttribute('data-usd-selected'),
+        '',
+        `${path}: the panel's × button left the prim selected`,
+      )
+      const buttonShot = join(artifacts, `${path.replaceAll('/', '_')}-selected-cleared-by-button.png`)
+      await canvas.screenshot({ path: buttonShot })
+      const buttonDelta = await probe.difference(unselectedShot, buttonShot, 12)
+      assert.ok(
+        buttonDelta.changed < buttonDelta.total * 0.002,
+        `${path}: the × button did not restore the frame (${buttonDelta.changed} pixels differ)`,
+      )
+      assert.ok(
+        buttonDelta.peak <= 8,
+        `${path}: the × button left a visible trace (peak channel delta ${buttonDelta.peak})`,
+      )
+
+      // ── the details panel reads what the file declares ──────────────────
+      // The remaining assertion in this case is about *content*, which pixels
+      // cannot check: the panel has to show the prim's declared type, its
+      // attributes with declared types, and its relationships — from the layer
+      // bytes, which is the whole reason it is a second reader.
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+      await page.waitForTimeout(800)
+      const detailsPath = await page.locator('[data-usd-preview]').getAttribute('data-usd-selected')
+      await page.locator('[data-usd-details-toggle]').click()
+      const details = page.locator('[data-usd-details]')
+      await details.waitFor({ timeout: 15_000 })
+      // The panel is async: it reads the layers off the main thread's queue.
+      await page.waitForTimeout(900)
+      const detailsText = await details.innerText()
+      assert.ok(
+        detailsText.includes(detailsPath),
+        `${path}: the details panel does not name the selected prim (${detailsPath})\n${detailsText.slice(0, 400)}`,
+      )
+      // The prim that was clicked is a mesh in every fixture: its declared type
+      // and its geometry attributes must be stated.
+      const detailAttributes = await details.locator('[data-usd-detail-attr]').count()
+      assert.ok(detailAttributes > 0, `${path}: the details panel listed no attributes\n${detailsText.slice(0, 400)}`)
+      const attributeNames = await details.locator('[data-usd-detail-attr]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-usd-detail-attr')))
+      const known = ['points', 'faceVertexCounts', 'faceVertexIndices', 'extent', 'xformOp:translate', 'xformOp:scale', 'primvars:st']
+      assert.ok(
+        attributeNames.some(name => known.includes(name)),
+        `${path}: the details panel listed none of the mesh's own attributes: ${attributeNames.join(', ')}`,
+      )
+      // A declared type is printed beside each attribute: `point3f[]`, `int[]`,
+      // not "object" or an empty cell.
+      if (attributeNames.includes('points')) {
+        const pointsRow = details.locator('[data-usd-detail-attr="points"]')
+        const pointsText = await pointsRow.innerText()
+        assert.match(pointsText, /point3f\[\]/, `${path}: the points attribute does not show its declared type: ${pointsText}`)
+        const pointsValue = await pointsRow.locator('[data-usd-detail-value]').innerText()
+        assert.ok(pointsValue.length > 0 && pointsValue !== '—', `${path}: the points attribute has no value`)
+      }
+      // The layer the values came from is named, so a surprising value is traceable.
+      // It is not always the opened file: a prim a reference composes is described
+      // by the referenced layer, which is the case this assertion must allow for.
+      assert.match(detailsText, /\.usd[acz]?\b/, `${path}: the details panel does not name its layer\n${detailsText.slice(0, 400)}`)
+      // A prim reached through a reference is authored under a path the stage does
+      // not use, and the panel names both — that is the fact this feature exists to
+      // make visible. `refs/unit.usda` is the deterministic case: its only mesh
+      // belongs to the referenced layer, so the click always lands on one.
+      if (composed === true) {
+        const authored = details.locator('[data-usd-detail-authored]')
+        assert.equal(await authored.count(), 1, `${path}: the details panel does not say where the referenced prim is authored\n${detailsText.slice(0, 400)}`)
+        const authoredPath = (await authored.innerText()).trim()
+        assert.ok(authoredPath.startsWith('/'), `${path}: the authored path must be a prim path, got "${authoredPath}"`)
+        assert.notEqual(authoredPath, detailsPath, `${path}: the authored path must differ from the composed one`)
+        caseShot.authored = authoredPath
+      } else if (flat === true) {
+        assert.equal(
+          await details.locator('[data-usd-detail-authored]').count(),
+          0,
+          `${path}: a prim authored at its own stage path must not repeat it`,
+        )
+      }
+      caseShot.details = { attributes: detailAttributes, names: attributeNames.slice(0, 8) }
+      const detailsShot = join(artifacts, `${path.replaceAll('/', '_')}-details.png`)
+      await page.screenshot({ path: detailsShot })
+      await details.locator('[data-usd-details-close]').click()
+      assert.equal(await page.locator('[data-usd-details]').count(), 0, `${path}: the panel's × did not close it`)
+
+      caseShot.prims = { count: primCount, picked, selection: selectedPath, cleared: cleared.changed }
     }
     results.push(caseShot)
     await page.close()

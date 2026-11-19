@@ -576,6 +576,107 @@ try {
   results.moved = moved
   assert.ok(moved.changed > 2000, 'pulled frames drew only ' + moved.changed + ' changed pixels')
 
+  // ── the selection highlight: added, seen, cleared ────────────────────────
+  // The tint is an annotation the view owns, so it is asserted twice: in the
+  // object tree (one copy, parented to the picked mesh, at its world position) and
+  // in the frame (pixels move, then move back exactly). The screenshots go to the
+  // artifacts directory: this is the visual record of the feature.
+  const baseShot = join(artifacts, 'selection-before.png')
+  const selectionShot = join(artifacts, 'selection-highlighted.png')
+  const restoredShot = join(artifacts, 'selection-cleared.png')
+  await page.evaluate(async () => {
+    globalThis.__studio.reset()
+    await globalThis.__studio.settle()
+    await globalThis.__studio.waitFrames(3)
+  })
+  await canvas.screenshot({ path: baseShot })
+  const selection = await page.evaluate(async () => {
+    const showing = globalThis.__studio.select(0)
+    await globalThis.__studio.waitFrames(4)
+    const info = globalThis.__studio.selectionInfo()
+    const source = globalThis.__studio.selectedWorldPosition()
+    return {
+      showing,
+      info,
+      source,
+      // The highlight must never be what a ray finds, so the picked source is
+      // reported with the copy present.
+      activeAfterSelect: globalThis.__studio.selectionActive(),
+    }
+  })
+  await canvas.screenshot({ path: selectionShot })
+  const cleared = await page.evaluate(async () => {
+    const active = globalThis.__studio.clearSelection()
+    await globalThis.__studio.waitFrames(4)
+    return { active, info: globalThis.__studio.selectionInfo() }
+  })
+  await canvas.screenshot({ path: restoredShot })
+
+  results.selection = selection.info
+  assert.equal(selection.showing, true, 'the view refused to highlight a mesh')
+  assert.equal(selection.info.active, true, 'the view does not report an active selection')
+  assert.equal(selection.activeAfterSelect, true)
+  assert.equal(selection.info.copies.length, 1, 'expected exactly one tint copy, found ' + selection.info.copies.length)
+  const tint = selection.info.copies[0]
+  assert.equal(tint.parentIsMesh, true, 'the tint must be parented to the mesh it highlights, or a joint would leave it behind')
+  assert.equal(tint.materialType, 'MeshBasicMaterial', 'the tint is not an unlit overlay: ' + tint.materialType)
+  assert.equal(tint.transparent, true, 'the tint is opaque, so it would hide the selection it marks')
+  assert.ok(tint.opacity > 0.2 && tint.opacity < 0.7, 'the tint opacity is ' + tint.opacity)
+  assert.equal(tint.castShadow, false, 'the tint casts a second shadow')
+  // The copy is parented at the identity transform, so it lands where its source
+  // is: this is what makes a highlighted part follow its own joint.
+  const source = selection.source
+  assert.ok(source !== null, 'no mesh carries the tint')
+  for (let axis = 0; axis < 3; axis += 1) {
+    assert.ok(
+      Math.abs(tint.worldPosition[axis] - source[axis]) < 1e-6,
+      'the tint is not at its source\'s world position: ' + tint.worldPosition + ' vs ' + source,
+    )
+  }
+  assert.equal(cleared.active, false, 'clearSelection() left a highlight showing')
+  assert.equal(cleared.info.copies.length, 0, 'clearSelection() left a tint copy in the scene')
+
+  // The frame: the tint is visible, and clearing it restores the exact image.
+  const tinted = await diffStats(baseShot, selectionShot, 12)
+  const clearedBack = await diffStats(baseShot, restoredShot, 12)
+  results.selectionDiff = { tinted, restored: clearedBack }
+  assert.ok(tinted.changed > 500, 'the highlight changed only ' + tinted.changed + ' pixels')
+  // What a tint does to a surface is shift its hue towards the accent, not raise
+  // its brightness: the accent covers part of the surface, and that surface's own
+  // shading is still under it. Blue-over-red is the accent's own signature, so the
+  // highlighted pixels must be bluer than the ones they replaced — a re-render
+  // (a moved camera, a re-drawn shadow) leaves that ratio alone.
+  const bluenessBefore = tinted.blueBefore - tinted.redBefore
+  const bluenessAfter = tinted.blueAfter - tinted.redAfter
+  results.selectionShift = { bluenessBefore, bluenessAfter }
+  assert.ok(
+    bluenessAfter > bluenessBefore + 20,
+    'the highlight did not tint the surface towards the accent (blue-red '
+      + bluenessBefore + ' -> ' + bluenessAfter + ')',
+  )
+  assert.ok(
+    clearedBack.changed < clearedBack.total * 0.002,
+    'clearing the selection left ' + clearedBack.changed + ' pixels changed',
+  )
+
+  // The tint follows the wireframe toggle: it is not under the model's materials,
+  // so nothing but the view's own setter can reach it.
+  const wireframeTint = await page.evaluate(async () => {
+    globalThis.__studio.view().setWireframe(false)
+    globalThis.__studio.select(0)
+    await globalThis.__studio.waitFrames(2)
+    const before = globalThis.__studio.selectionInfo().copies[0]?.wireframe
+    globalThis.__studio.view().setWireframe(true)
+    await globalThis.__studio.waitFrames(2)
+    const during = globalThis.__studio.selectionInfo().copies[0]?.wireframe
+    globalThis.__studio.view().setWireframe(false)
+    globalThis.__studio.clearSelection()
+    return { before, during }
+  })
+  results.wireframeTint = wireframeTint
+  assert.equal(wireframeTint.before, false)
+  assert.equal(wireframeTint.during, true, 'the highlight did not follow wireframe mode')
+
   // ── teardown, and a second view after it ────────────────────────────────
   const teardown = await page.evaluate(async () => {
     globalThis.__studio.unmount()
@@ -765,6 +866,10 @@ row('tone', 'model p10/p50/p90/p99 ' + tone.p10 + '/' + tone.p50 + '/' + tone.p9
 row('shadow', 'centroid y ' + shadow.centroidY + ' vs model centroid y ' + results.modelCentre.y
   + ' (' + results.modelCentre.pixels + ' model px)')
 row('pulled', 'a moving part changes ' + moved.changed + ' px (' + percent(moved.share) + ') on pulled frames')
+row('selection', 'highlight changes ' + results.selectionDiff.tinted.changed + ' px (blue-red '
+  + results.selectionShift.bluenessBefore + ' -> ' + results.selectionShift.bluenessAfter
+  + '), cleared back to ' + results.selectionDiff.restored.changed + ' px, '
+  + 'wireframe follows ' + results.wireframeTint.before + ' -> ' + results.wireframeTint.during)
 row('framing', 'model fills ' + percent(framing.fill.x) + ' x ' + percent(framing.fill.y) + ' of the frame'
   + ', centre offset ' + percent(framing.offset.x) + ' x ' + percent(framing.offset.y)
   + ', margins l/r/t/b ' + percent(framing.margin.left) + '/' + percent(framing.margin.right)

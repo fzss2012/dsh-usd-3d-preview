@@ -28,7 +28,7 @@ dsh-usd-3d-preview
 ├─ lib/client.js           browser half (classic-CJS module-table entry; three, the WASM engine,
 │                          articulation/kinematics and the studio view are inlined)
 ├─ src/                    the only source of truth: host/ + client/
-├─ tests/                  eleven suites (including real Chromium pixel tests) + fixtures
+├─ tests/                  fourteen suites (including real Chromium pixel tests) + fixtures
 └─ cordis.patch.yml        bundle patch layer: one `ui-usd-3d-preview` entry
 ```
 
@@ -72,8 +72,10 @@ Measured by `npm test` (fixtures are committed; the render suites draw them in C
 | Interactive / environment | WASM engine (default) | Fallback (three) |
 |---|---|---|
 | `UsdPhysics` joints (`PhysicsRevoluteJoint` / `PhysicsPrismaticJoint` / `PhysicsFixedJoint`) | ✅ read back from the composed layer bytes: body tree, axes, travel limits, home pose; click-to-toggle + All open / All close / Home | ❌ prim paths are lost in the fallback, no articulation |
+| Prim details (declared type / kind / attributes / relationships) | ✅ read back from the same layer bytes the stage was composed from, ASCII and crate alike | ❌ no layer map is kept, so the panel reports that the declarations cannot be read back |
 | Collider geometry (`purpose = "guide"` or `PhysicsCollisionAPI`) | ✅ rebuilt from the same bytes as an overlay + wireframe, hidden by default | ❌ |
 | Studio rendering | ✅ Khronos PBR Neutral tone mapping, PMREM environment, 4 rect lights, 2048² shadows, lit ground disc, on-demand draw | ✅ same view |
+| Selection highlight | ✅ the picked object is re-tinted in the accent under an instanced/parented copy; Esc, the panel's × or a background click clears it | ✅ same pick path — a stage the fallback composed is still clickable, but only names a prim when the engine kept the paths |
 | `s3://` asset-layer references | ✅ ASCII layers localized + prefetched through the host route (object storage must be configured) | ❌ |
 
 The stats line at the bottom of the panel reports **engine / layer count / warning count**, and
@@ -106,11 +108,14 @@ Files tab click                    drag a file/folder onto the sidebar
          │      │                    dropped path:   one pass, all bytes already in the page
          │      ├─ articulation: UsdPhysics read back from the same layer bytes
          │      │     (src/client/articulation.js → src/client/kinematics.js)
+         │      ├─ details: declared type / kind / apiSchemas / attributes / relationships
+         │      │     for the selected prim (src/client/layer-text.js + details.js)
          │      └─ fallback: three USDCParser / USDAParser / USDComposer
          │
          ├─ createView()  (src/client/view.js)
          │     ├─ three.js WebGLRenderer + src/client/studio.js
-         │     └─ orbit controls, 3-point rect lights, shadows, ground, framing, on-demand draw
+         │     ├─ orbit controls, 3-point rect lights, shadows, ground, framing, on-demand draw
+         │     └─ src/client/selection.js — the accent tint under the picked object
          │
          └─ injected readers: readLayer (workspace Remote) → sibling layer bytes
                               readAsset  (host route)      → s3:// object bytes
@@ -340,13 +345,68 @@ Folders start expanded and a click collapses or reopens one; clicking a prim cop
 Filtering keeps every match together with its ancestors and subtrees, and a very large tree is
 clipped with the clip count stated in the panel.
 
-Clicking the model names the prim under the cursor: the panel shows it as **Picked:**, reveals its
-folders, highlights the matching row, and the closed-panel hint carries the same line. Naming a prim needs the vertex
-arrays three's raycaster reads, which the engine frees after upload. They are kept for stages below
-a triangle budget (2 million by default; set `globalThis.__DSH_USD_PICK_TRIANGLE_BUDGET__` before
+Clicking the model names the prim under the cursor **and highlights it in the viewport**: the
+clicked object is re-drawn in the shell's accent colour, over its own surface, so "which one did I
+just click?" is answered by the frame and not only by the panel. The panel shows it as **Picked:**,
+reveals its folders, highlights the matching row, and the closed-panel hint carries the same line.
+**Escape**, the panel's × button, or a click on the background clears the highlight; the highlight
+is a child of the picked mesh, so an articulated part keeps its tint while its own joint moves it,
+and one placement of a `PointInstancer` is tinted rather than the whole batch. The tint never
+intercepts a click (a second click on the same part selects the part again, not its tint) and never
+writes depth, so a selected object that is behind another stays occluded. It follows the
+**Wireframe** toggle, and clearing it leaves no visible trace — the browser suites assert the
+changed share stays under 0.2% and the largest channel delta anywhere is within the rasterizer's
+noise. [`docs/screenshots/selection-unselected.png`](docs/screenshots/selection-unselected.png) vs
+[`selection-highlighted.png`](docs/screenshots/selection-highlighted.png) is the visual pair.
+Naming a prim needs the vertex arrays three's raycaster reads, which the engine frees after
+upload. They are kept for stages below a triangle budget (2 million by default; set `globalThis.__DSH_USD_PICK_TRIANGLE_BUDGET__` before
 the bundle runs to change it), so a stage above the budget keeps the engine's release and its canvas
 clicks do nothing — they do not throw. Retaining the arrays is real memory (roughly 40–100 bytes per
 triangle, so tens to a couple of hundred MB at the ceiling), which is exactly what the budget bounds.
+
+## Prim details
+
+The **Details** button opens a panel that answers a different question than the prim tree: not "what
+is in this stage" but "what does this file *declare* about this prim". It follows the selection, so
+clicking a prim in the viewport — or picking one in the tree — fills it in. The presentation follows
+**usdview**'s *Prim Metadata* and *Attributes* panes, so a USD reader's vocabulary works unchanged:
+
+| Section | What it shows |
+|---|---|
+| Header | the prim path, its declared **type** (`Mesh`), its **kind**, and whether it is a `def` / `over` / `class` |
+| Applied schemas | every `apiSchemas` entry, including namespaced ones (`PhysicsDriveAPI:angular`) |
+| Composition | authored `inherits` / `specializes`, declared variant sets, `doc`, and the layers that described the prim |
+| Attributes | a **`type` · `name` · value** table, grouped Transform / Geometry / Physics / Materials / Other, with `custom` and `uniform` shown beside the name, and — on a multi-layer stage — the layer each value was taken from |
+| Relationships | authored relationships (`material:binding`, `physics:body0`, …) with their resolved target paths |
+
+The values are the ones **the strongest layer authored**, and that layer is named: the panel's layer
+list names every layer that described the prim, and on a multi-layer stage each attribute row carries
+the layer its own value came from. Merging layers is the engine's job and doing it again here would be
+a second opinion, while naming the source makes a surprising value traceable. Fields a composed three
+graph simply does not keep are exactly what this panel exists to show — the declared type of every
+attribute, `custom` attributes (`userProperties:blender:data_name`), applied API schemas,
+`purpose = "guide"` on a collision hull.
+
+A referenced or payloaded prim is **authored under a different path than the stage composes**, so the
+reader walks the composition arcs the layers declare: a prim reached through `references` or `payload`
+is looked for at the path that layer wrote, and the header names both (`/root/unit/body` composed,
+`/root/body` authored). Sublayers compose at the same path and are simply added to the describing
+layers. Without that walk every referenced asset answered "no layer describes that prim".
+
+Two rules keep it honest on a large stage. A **long array is counted, not materialised**: the panel
+reports `point3f[482]` and a preview of its first elements, deriving the count from the array's
+punctuation rather than from its values, so a solved robot's ~90 MiB geometry layer costs one
+delimiter scan instead of a parse. And a prim no layer describes is reported as absent, not as an
+empty table. The three fallback composes no layer map, so it says the declarations cannot be read
+back instead of guessing.
+
+`src/client/layer-text.js` is the reader both this panel and the articulation read-back use — one
+lexer for one grammar, so the two can never disagree about the same file. `src/client/details.js`
+adds the crate path (three's `USDCParser` already decodes the field set; the details reader keeps the
+per-attribute `typeName` / `variability` / `custom` it discards) and the presentation rules.
+[`docs/screenshots/details-panel.png`](docs/screenshots/details-panel.png) is the captured panel, and
+[`docs/screenshots/details-referenced.png`](docs/screenshots/details-referenced.png) is the same panel on a
+prim a reference composed.
 
 ## Build and install
 
@@ -356,7 +416,7 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # objstore + update + instancer + register + drop + parse + s3 + articulation + studio + articulation-render + render
+npm test               # objstore + update + instancer + register + drop + prim-tree + selection + details + parse + s3 + articulation + studio + articulation-render + render
 npm run update:local   # update this checkout from its upstream and rebuild (see below)
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
@@ -438,13 +498,15 @@ terminal update plus a host restart, because the route is itself part of the new
 | `instancer` | the custom-type rewrite in isolation: a prim whose **own** fields carry `protoIndices` and `prototypes`/`positions` is promoted, a custom group around an instancer is not, and a prim with only part of the signature stays untouched — the container case is what protects a nested custom-instancer library |
 | `drop` | the external-asset path without a browser: name/key helpers, stage candidates and the auto-open rule, BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, picker collection, and the capture-phase sidebar listener against a faked document (USD drag claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
 | `prim-tree` | the prim-path hierarchy in isolation: natural numeric ordering, tree building with copyable ancestor folders, ancestor-preserving filtering, bounded flattening with an honest total, and picked-path ancestor reveal |
+| `details` | the prim-details reader in isolation, no browser: declared types (`point3f[]`, `int[]`, `token`, never a JavaScript type), `custom` / `uniform` modifiers, `kind` and `apiSchemas`, relationships with resolved targets, **ASCII and crate agreeing on every attribute of the same stage**, a long array summarised by its true element count instead of materialised (and counted as elements, not components), a declared-but-unset attribute keeping its type, **a prim a `references` arc re-roots found under its composed path with its authored path reported**, a `subLayers` layer contributing at the same path, a UTF-8 BOM staying a text layer, the no-layer-bytes / no-such-prim answers staying distinct, and the panel's ordering and value-formatting rules |
+| `selection` | the selection highlight in isolation, no browser: one tint copy parented to the picked mesh and sharing its geometry (so a joint carries it and no vertex is duplicated), the copy refusing to be raycast, one placement of an instanced batch tinted rather than the batch, groups/points/lines refused instead of invented, the wireframe mode reaching a tint created after it, the source's face policy mirrored onto the tint both ways (`DoubleSide` kept, `FrontSide` taken back off the shared material), and `dispose()` releasing only its own material — never the caller's geometry |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
 | `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and the asset/health routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
 | `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
 | `update` | the local-checkout updater offline: ahead/behind parsing, dirty/detached/not-a-checkout refusals, check/update/restart actions, the single-update lock, restart command construction, a **real local-git integration** (bare origin + clone: fast-forward, package.json-aware install skip, rebuild, host-change detection, idempotent rerun), and the update route's GET/POST registration with malformed-body/unknown-action refusal |
-| `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, and that a throwing frame observer stops the loop instead of hot-looping |
-| `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame, Home restores it, colliders add their overlay, and idle draws nothing |
+| `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, that a throwing frame observer stops the loop instead of hot-looping, and the selection highlight: one copy at the picked mesh's world position, its pixels visibly shifted towards the accent, and clearing it returning the frame to the unselected image |
+| `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame and selects the part, Home restores it, the tint travels with the part it marks, Escape and a background click deselect, colliders add their overlay, and idle draws nothing |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame, stay pickable, and the stats must name the OpenUSD (WASM) engine; a prim-panel case checks the path list, its filter and that a canvas click names the picked prim. Screenshots land in `tests/.artifacts/` |
 
 The browser suites need Playwright + Chromium. Without a browser they print `SKIP`, and `npm test`
@@ -501,6 +563,20 @@ the inner instancer and its prototype inside a payload layer (2 layers, 4 quads)
   so only the primary instance is driven correctly.
 - **Articulated stages keep one copy of the vertex arrays** (position / normal / uv) so that
   raycast picking works; static stages still release them.
+- **The selection highlight is a tint, not an outline, and it is not a picking tool.** There is no
+  hover state, no marquee, no multi-select and no "select all descendants of this prim": a click
+  selects exactly the mesh (or the one `PointInstancer` placement) it landed on. It is also bounded
+  by what can be picked at all — a stage above the picking budget keeps the engine's vertex-array
+  release, so its canvas selects nothing. A selected object that is hidden (the collider toggle) is
+  not drawn and neither is its tint, which is deliberate: the tint never claims an object is visible
+  when the model itself does not draw it.
+- **The details panel is a re-read of the layers, not a composed query.** It shows the value the
+  strongest layer of the composed stage authored and names that layer; it does not evaluate variants,
+  resolve `inherits` chains, or apply one layer's opinion over another's field by field — that is the
+  engine's composition, and doing it again here would be a second opinion. It does follow `references`,
+  `payload` and `subLayers` far enough to find the layer that authored a composed prim (see *Prim
+  details* above), but it does not re-compose what it finds there. The three fallback keeps no layer
+  map and reports that instead of showing nothing.
 - **One read per referenced layer, byte-windowed above the Host cap.** The Host refuses a
   complete read above `workspaceFiles.maxFileBytes` (default 32 MiB) and one window above
   `maxBytes` (default 2 MiB). The reader asks for the complete layer first and, when the Host
@@ -569,6 +645,14 @@ MIT — see [LICENSE](LICENSE).
 在 Web Worker 里完成，three.js 负责渲染；引擎不可用时自动回退到 three 的解析器并在面板上写明。
 被引用图层经工作区 Remote 读回后重新组合，最多 8 轮；带 `UsdPhysics` 关节的资产可交互
 （点击部件开合、全部打开/收起/复位、碰撞体线框，纯前向运动学，无物理引擎）；影棚布光 + 按需绘制。
+点击模型会**高亮**点中的物体：在原网格上叠一层强调色着色，面板同时显示它的 prim 路径；
+**Esc**、面板上的 ×、或点击空白处都能取消高亮，取消后画面与未选中时逐像素一致；
+高亮跟随部件本身的关节运动，`PointInstancer` 只高亮被点中的那一个实例，且高亮本身不会挡住下一次点击。
+「详情」面板按 usdview 的 Prim Metadata / Attributes 版面展示选中 prim 的声明：类型与 kind、
+已应用的 API Schema、逐条属性的**声明类型**与值（含 `custom` / `uniform` 标记）、关系的关系路径，
+以及该 prim 来自哪些图层（多层时逐条属性标注取值来自哪一层）；被 `references` / `payload` 重新挂载的
+prim 会按图层里真实书写的路径回读，并同时标出组合后的路径与原路径；超长数组只报元素个数与前几项
+（`point3f[482] (…)`），因此读取大资产的几何图层也是一次分隔符扫描，不会把整层解析进内存。
 外部资产（桌面上的文件或文件夹）可以直接拖到右侧边栏打开：侧边栏「开始」页有「USD 三维预览」
 入口卡片，拖拽落在侧边栏面板上即会打开预览标签页，文件夹会连同被引用的图层和贴图一起读取；
 字节只在浏览器内处理，不上传、不写入工作区。

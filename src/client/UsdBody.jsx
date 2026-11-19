@@ -16,8 +16,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TreeChevron, TreeFolder, TreePrim } from './artwork.jsx'
+import { PrimDetailsPanel } from './DetailsPanel.jsx'
 import { createArticulationController } from './kinematics.js'
-import { assemble, disposeObject } from './parse.js'
+import { assemble, describePrim, disposeObject } from './parse.js'
 import {
   allFolderPaths, ancestorsOf, buildPrimTree, countPrimNodes, filterPrimTree, flattenPrimTree,
 } from './prim-tree.js'
@@ -33,6 +34,10 @@ const SHELL = {
   color: LABEL,
   fontFamily: FONT,
   fontSize: 12,
+  // The shell takes focus on a pointer press (see the Escape handler): a click on
+  // the model has to be what "the keyboard is here now" means, or Escape would
+  // keep going to whatever the user was typing in before.
+  outline: 'none',
 }
 
 const CANVAS = { position: 'absolute', inset: 0 }
@@ -272,6 +277,7 @@ export function UsdBody(props) {
   const t = props.t
   const data = content !== undefined && content.kind === 'bytes' ? content.data : undefined
   const name = usdFileName(resourceAddress)
+  const shellRef = useRef(null)
   const containerRef = useRef(null)
   const viewRef = useRef(null)
   // The reader is registration-scoped, not render-scoped: keeping it in a ref
@@ -300,6 +306,10 @@ export function UsdBody(props) {
   const [collapsedFolders, setCollapsedFolders] = useState(() => new Set())
   const [picked, setPicked] = useState(null)
   const [copiedPath, setCopiedPath] = useState(null)
+  // The details panel answers a different question than the prim tree — "what does
+  // the file declare about this prim" — so it is its own panel with its own state
+  // rather than more rows in a list of names.
+  const [detailsOpen, setDetailsOpen] = useState(false)
 
   /**
    * Dictionary lookup with a literal fallback: copy must never be the reason a
@@ -326,6 +336,9 @@ export function UsdBody(props) {
     const controller = new AbortController()
     setParsed(null)
     setFailure(null)
+    // A new assembly is a new scene: the old selection named an object that no
+    // longer exists, and the view that carried its tint is about to be destroyed.
+    setPicked(null)
     // One macrotask, so the status line paints before a large layer blocks the thread.
     const timer = setTimeout(async () => {
       /** Bind moving parts before the view exists, so the first frame is posed. */
@@ -464,9 +477,10 @@ export function UsdBody(props) {
       ? undefined
       : view.onFrame(deltaMs => parts.tick(deltaMs) === true)
     // Picking serves two purposes: an articulated stage opens the clicked part,
-    // a static one names it. Both are the same click. A stage above the picking
-    // budget kept the engine's post-upload release, so its vertex arrays are
-    // gone and three's raycaster would throw on them: no handler, no click.
+    // a static one names it. Both are the same click, and both highlight what was
+    // hit: a name in the panel is easy to lose on a busy stage. A stage above the
+    // picking budget kept the engine's post-upload release, so its vertex arrays
+    // are gone and three's raycaster would throw on them: no handler, no click.
     const stopPick = parsed.pickable === true
       ? view.onPick((hits) => {
         if (parts !== undefined && parts.pick(hits) === true) view.requestRender()
@@ -477,6 +491,14 @@ export function UsdBody(props) {
           : (object.isInstancedMesh === true && Array.isArray(object.userData?.paths)
             ? object.userData.paths[hit.instanceId]
             : object.name)
+        // A click is one selection: whatever the pick landed on replaces the
+        // previous tint and the previous name together. Two cases show nothing —
+        // empty space (no hit), and a prim with no surface to tint (points,
+        // lines) — and both clear what was there rather than leaving a stale
+        // tint behind. The name is only drawn for an engine-composed stage, whose
+        // meshes are named by prim path; the three fallback keeps the last path
+        // segment, so there the click tints but names nothing.
+        view.setSelection(hit)
         setPicked(typeof name === 'string' && name.startsWith('/') ? name : null)
       })
       : undefined
@@ -487,6 +509,72 @@ export function UsdBody(props) {
       view.destroy()
     }
   }, [parsed])
+
+  // One way to undo a selection, whatever the reason: the panel's × button, the
+  // Escape key and a click on the background all land here. The tint and the name
+  // are one selection, so they always go together.
+  const clearSelection = useCallback(() => {
+    viewRef.current?.clearSelection()
+    setPicked(null)
+  }, [])
+
+  // The details reader is bound to the assembly, not to the selection: it reads
+  // the layer bytes that produced this stage, and a stage with no bytes (the
+  // three fallback) answers "cannot read back" instead of reading a stale one.
+  //
+  // It has to be memoized on the assembly, because the panel re-reads whenever the
+  // reader it was handed changes — and a fresh arrow function on every render would
+  // mean a full re-decode of every layer each time this component draws, which is
+  // once per keystroke in the prim filter. The reader is a fact about `parsed`, so
+  // `parsed` is its whole dependency list.
+  const primReader = useMemo(
+    () => (parsed === null ? undefined : path => describePrim(parsed, path)),
+    [parsed],
+  )
+  // Detail hint keys mirror usdview's pane names so a USD reader's vocabulary
+  // works here: Type / Kind / Applied schemas / Attributes / Relationships. The
+  // two panels sit on opposite edges, so opening one does not hide the other —
+  // picking in the tree and reading the table is the ordinary way to use them.
+  const openDetails = useCallback(() => {
+    setDetailsOpen(true)
+    setPrimsOpen(true)
+  }, [])
+
+  // Clicking a prim in the tree is the other way to ask "what is this?" — the
+  // details panel follows the selection, so it stays in step with what the tree
+  // says is picked instead of being a second, independent cursor.
+  const selectFromTree = useCallback((path) => {
+    setPicked(path)
+    // A tree row is a name, not a surface: there is nothing in the frame to tint,
+    // and a tint left over from an earlier click would point at a different prim.
+    viewRef.current?.clearSelection()
+  }, [])
+
+  // Esc clears the selection. The listener is on the document rather than on the
+  // canvas because a canvas that lost focus to a toolbar button would otherwise
+  // swallow the key, and because the selection is the panel's state, not the
+  // canvas's. Three things keep it from stealing a key that belongs elsewhere: an
+  // IME composition (Escape cancels the composition — a Chinese input would
+  // otherwise lose both), a text field (the prim filter), and focus that is
+  // demonstrably in another part of the page. Focus that is nowhere — the state
+  // after clicking the canvas — is this panel's.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape' || event.defaultPrevented === true || event.isComposing === true) return
+      const target = event.target
+      const tag = typeof target?.tagName === 'string' ? target.tagName.toLowerCase() : ''
+      if (tag === 'input' || tag === 'textarea' || target?.isContentEditable === true) return
+      const shell = shellRef.current
+      const focusElsewhere = shell !== null && target !== undefined && target !== null
+        && target !== document.body && target !== document.documentElement
+        && shell.contains(target) === false
+      if (focusElsewhere === true) return
+      clearSelection()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [clearSelection])
 
   // The graph is released with its viewport, whether or not one was ever built.
   useEffect(() => () => {
@@ -625,13 +713,26 @@ export function UsdBody(props) {
 
   return (
     <div
+      ref={shellRef}
       style={SHELL}
+      // Focusable but not in the tab order: a pointer press on the canvas takes
+      // focus, so Escape afterwards belongs to this viewport rather than to
+      // whatever the user was typing in before clicking the model. A press that
+      // lands on one of the panel's own controls leaves focus to that control.
+      tabIndex={-1}
+      onPointerDown={(event) => {
+        const target = event.target
+        const tag = typeof target?.tagName === 'string' ? target.tagName.toLowerCase() : ''
+        if (tag === 'input' || tag === 'textarea' || tag === 'button' || tag === 'a' || target?.isContentEditable === true) return
+        shellRef.current?.focus({ preventScroll: true })
+      }}
       data-usd-preview
       data-usd-engine={parsed?.engine ?? ''}
       data-usd-engine-error={parsed?.engineError ?? ''}
       data-usd-parts={parts === undefined ? 0 : parts.movingParts}
       data-usd-colliders={parts?.hasColliders === true ? '1' : '0'}
       data-usd-pickable={parsed?.pickable === true ? '1' : '0'}
+      data-usd-selected={picked ?? ''}
     >
       <div ref={containerRef} style={CANVAS} data-usd-preview-stage />
       {failure !== null && (
@@ -711,17 +812,55 @@ export function UsdBody(props) {
               style={buttonStyle(primsOpen)}
               data-usd-prims-toggle
               title={label('primsHint', 'Show the prim paths this stage carries')}
-              onClick={() => setPrimsOpen(value => !value)}
+              onClick={() => {
+                setPrimsOpen(value => !value)
+              }}
             >
               {label('prims', 'Prims')} · {primCount}
+            </button>
+            <button
+              type="button"
+              style={buttonStyle(detailsOpen)}
+              data-usd-details-toggle
+              title={label('detailsHint', 'Show what the stage declares about the selected prim')}
+              onClick={() => (detailsOpen === true ? setDetailsOpen(false) : openDetails())}
+            >
+              {label('details', 'Details')}
             </button>
           </div>
           {!primsOpen && <div style={HINT}>
             {label('help', 'Drag to orbit · wheel to zoom · right-drag to pan')}
             {partsHint === undefined ? '' : <div style={{ marginTop: 2 }} data-usd-parts-hint>{partsHint}</div>}
             {picked === null ? '' : (
-              <div style={{ marginTop: 2 }} data-usd-picked>
-                {label('picked', 'Picked')}: <span style={{ fontFamily: PRIM_MONO }}>{picked}</span>
+              // The hint carries the same selection the panel does, and the same
+              // way out of it: with the prims panel closed there would otherwise
+              // be a tint with no affordance to clear it.
+              <div style={{ marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }} data-usd-picked>
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {label('picked', 'Picked')}: <span style={{ fontFamily: PRIM_MONO }}>{picked}</span>
+                </span>
+                <button
+                  type="button"
+                  data-usd-picked-clear
+                  title={label('clearSelection', 'Clear the selection (Esc)')}
+                  aria-label={label('clearSelection', 'Clear the selection (Esc)')}
+                  onClick={clearSelection}
+                  style={{
+                    flex: '0 0 auto',
+                    padding: '0 4px',
+                    borderRadius: 4,
+                    border: `1px solid ${BORDER}`,
+                    background: 'transparent',
+                    color: LABEL_DIM,
+                    font: 'inherit',
+                    fontSize: 11,
+                    lineHeight: 1.4,
+                    cursor: 'pointer',
+                    pointerEvents: 'auto',
+                  }}
+                >
+                  ×
+                </button>
               </div>
             )}
           </div>}
@@ -743,6 +882,26 @@ export function UsdBody(props) {
                     onClick={() => void copyPath(picked)}
                   >
                     {copiedPath === picked ? '✓ ' : ''}{picked}
+                  </button>
+                  <button
+                    type="button"
+                    data-usd-picked-clear
+                    title={label('clearSelection', 'Clear the selection (Esc)')}
+                    aria-label={label('clearSelection', 'Clear the selection (Esc)')}
+                    onClick={clearSelection}
+                    style={{
+                      flex: '0 0 auto',
+                      padding: '1px 5px',
+                      borderRadius: 5,
+                      border: `1px solid ${BORDER}`,
+                      background: 'transparent',
+                      color: LABEL_DIM,
+                      font: 'inherit',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ×
                   </button>
                 </div>
               )}
@@ -773,7 +932,18 @@ export function UsdBody(props) {
                         aria-expanded={folder === true ? open : undefined}
                         style={primRowStyle(active, depth)}
                         title={node.path}
-                        onClick={() => (folder === true ? toggleFolder(node.path) : void copyPath(node.path))}
+                        onClick={() => {
+                          if (folder === true) {
+                            toggleFolder(node.path)
+                            return
+                          }
+                          // A leaf row is a prim the stage carries: selecting it
+                          // names it in the details panel, and copies it — the
+                          // copy is what the panel replaced as the row's action,
+                          // so both stay available.
+                          selectFromTree(node.path)
+                          void copyPath(node.path)
+                        }}
                       >
                         <span style={PRIM_ICON}>
                           {folder === true
@@ -796,6 +966,14 @@ export function UsdBody(props) {
                 )}
               </div>
             </div>
+          )}
+          {detailsOpen && (
+            <PrimDetailsPanel
+              path={picked}
+              read={primReader}
+              onClose={() => setDetailsOpen(false)}
+              t={t}
+            />
           )}
           {stats !== undefined && <div style={STATS} data-usd-stats>{stats}</div>}
           {engineWarnings.length > 0 && (

@@ -156,6 +156,10 @@ async function analyze(payload) {
     let deltaSum = 0
     let lumaFirst = 0
     let lumaSecond = 0
+    let redFirst = 0
+    let redSecond = 0
+    let blueFirst = 0
+    let blueSecond = 0
     let xSum = 0
     let ySum = 0
     for (let i = 0; i < size; i += 4) {
@@ -167,6 +171,12 @@ async function analyze(payload) {
       changed += 1
       lumaFirst += luma(first.data, i)
       lumaSecond += luma(second.data, i)
+      // The channels the changed pixels moved along: a tint shifts the hue, a
+      // re-render mostly shifts the brightness, and only the pair tells them apart.
+      redFirst += first.data[i]
+      redSecond += second.data[i]
+      blueFirst += first.data[i + 2]
+      blueSecond += second.data[i + 2]
       const pixel = i / 4
       xSum += pixel % first.width
       ySum += Math.floor(pixel / first.width)
@@ -179,6 +189,10 @@ async function analyze(payload) {
       meanDelta: round(deltaSum / total),
       lumaBefore: changed === 0 ? 0 : round(lumaFirst / changed),
       lumaAfter: changed === 0 ? 0 : round(lumaSecond / changed),
+      redBefore: changed === 0 ? 0 : round(redFirst / changed),
+      redAfter: changed === 0 ? 0 : round(redSecond / changed),
+      blueBefore: changed === 0 ? 0 : round(blueFirst / changed),
+      blueAfter: changed === 0 ? 0 : round(blueSecond / changed),
       centroidX: changed === 0 ? 0 : Math.round((xSum / changed) * 10) / 10,
       centroidY: changed === 0 ? 0 : Math.round((ySum / changed) * 10) / 10,
     }

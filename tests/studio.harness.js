@@ -412,6 +412,75 @@ globalThis.__studio = {
   },
 
   /**
+   * Select the model's first mesh the way a pick would, through the view's own
+   * API — no React, no picking: what is under test is what the view does with a
+   * target once it is told which object was hit.
+   * @param index - which mesh of the synthetic model to highlight.
+   * @returns whether a highlight is showing.
+   */
+  select(index = 0) {
+    const meshes = []
+    mounted.model.traverse((node) => { if (node.isMesh === true) meshes.push(node) })
+    const source = meshes[index]
+    if (source === undefined) return false
+    return mounted.view.setSelection({ object: source })
+  },
+
+  /** Drop the highlight, and report whether one is still showing. */
+  clearSelection() {
+    mounted.view.clearSelection()
+    return mounted.view.hasSelection()
+  },
+
+  /** Whether a highlight is showing. */
+  selectionActive() {
+    return mounted.view.hasSelection()
+  },
+
+  /** The view itself, so a suite can drive the same setters the toolbar calls. */
+  view() {
+    return mounted.view
+  },
+
+  /**
+   * The tint copies in the model, as plain data: what was added, under what, with
+   * which material. The suite asserts the *shape* of the annotation rather than a
+   * particular mesh name, because the view may only add copies of what it was
+   * given.
+   * @returns the copies and the model's own node count.
+   */
+  selectionInfo() {
+    const copies = []
+    let nodes = 0
+    mounted.model.traverse((node) => {
+      nodes += 1
+      if (node.userData?.usdSelection !== true) return
+      copies.push({
+        name: node.name,
+        parentName: node.parent === null || node.parent === undefined ? '' : node.parent.name,
+        parentIsMesh: node.parent?.isMesh === true,
+        materialType: node.material.type,
+        opacity: node.material.opacity,
+        transparent: node.material.transparent === true,
+        wireframe: node.material.wireframe === true,
+        castShadow: node.castShadow,
+        worldPosition: node.getWorldPosition(new THREE.Vector3()).toArray(),
+      })
+    })
+    return { active: mounted.view.hasSelection(), copies, nodes }
+  },
+
+  /** The world position of the highlighted mesh itself, for the follow check. */
+  selectedWorldPosition() {
+    let source = null
+    mounted.model.traverse((node) => {
+      if (source !== null || node.isMesh !== true) return
+      if (node.children.some(child => child.userData?.usdSelection === true)) source = node
+    })
+    return source === null ? null : source.getWorldPosition(new THREE.Vector3()).toArray()
+  },
+
+  /**
    * Wait until the on-demand loop has settled.
    *
    * The damping tail is the point: after a drag or after auto-rotate stops, the

@@ -22,6 +22,7 @@ import { USDAParser } from 'three/examples/jsm/loaders/usd/USDAParser.js'
 import { USDCParser } from 'three/examples/jsm/loaders/usd/USDCParser.js'
 import { USDComposer } from 'three/examples/jsm/loaders/usd/USDComposer.js'
 import { readArticulation } from './articulation.js'
+import { readPrimDetails } from './details.js'
 import { layerBasePath, normalizePosix, referenceKey } from './usd.js'
 
 /** `PXR-USDC`, the binary crate header. */
@@ -379,6 +380,10 @@ export async function assemble({ rootKey, rootBytes, read, readSibling, readAsse
         warnings: result.info.warnings.map(warning => ({ ...warning })),
         stats,
         pickable,
+        // The layers the stage was composed from, so the details panel can answer
+        // "what does the file declare about this prim" — the question the three
+        // graph, which keeps only what it draws, cannot.
+        sources: result.sources,
         // The engine owns textures too, so its own release is the complete one.
         dispose: result.dispose,
       }
@@ -497,6 +502,21 @@ function retainPickableAttributes(object) {
       }
     }
   })
+}
+
+/**
+ * Read one prim's declared details out of an assembled stage.
+ *
+ * A no-op for a stage the three fallback composed: it composed from layers this
+ * module holds no map of, and it does not keep the prim paths a details panel
+ * addresses prims by. The panel says so rather than guessing.
+ * @param parsed - the result of {@link assemble}.
+ * @param path - the prim path to describe.
+ * @returns the details, or undefined when the stage carries no layer bytes.
+ */
+export async function describePrim(parsed, path) {
+  if (parsed === null || parsed === undefined || parsed.sources === undefined) return undefined
+  return readPrimDetails(parsed.sources, path, { parseCrate: USDCParser })
 }
 
 /**

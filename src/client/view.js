@@ -48,10 +48,20 @@
  *
  * Both return their own unsubscribe function; neither keeps the other alive.
  *
+ * ## Selection
+ *
+ * A pick only *reports* what was hit: what a click means is the body's decision
+ * (an articulated stage drives a joint, a static one names a prim). The tint that
+ * shows the user which object that was is this view's, because it is a fact about
+ * the frame: {@link View#setSelection} draws the accent copy and
+ * {@link View#clearSelection} takes it back out, with the highlight module owning
+ * the copy itself (see `selection.js`).
+ *
  * @module dsh-usd-3d-preview/view
  */
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { createSelectionHighlight } from './selection.js'
 import { configureRenderer, createStudio, enableObjectShadows } from './studio.js'
 
 /**
@@ -74,6 +84,11 @@ import { configureRenderer, createStudio, enableObjectShadows } from './studio.j
  * @property {() => void} requestRender - ask for one more frame.
  * @property {(callback: (deltaMs: number) => boolean | void) => () => void} onFrame - observe drawn frames; return true to pull another.
  * @property {(callback: (hits: THREE.Intersection[]) => void) => () => void} onPick - observe clicks on the model.
+ * @property {(target: { object: THREE.Object3D, instanceId?: number } | undefined) => boolean} setSelection -
+ *   tint one hit object (or clear, with `undefined`); true when a highlight is
+ *   showing. The hit's own `object`/`instanceId` are the natural argument.
+ * @property {() => void} clearSelection - drop the highlight, leaving the frame as it was.
+ * @property {() => boolean} hasSelection - whether a highlight is showing.
  * @property {THREE.WebGLRenderer} renderer - the view's renderer: read-only handle, the view drives it.
  * @property {THREE.Scene} scene - the view's scene: read-only handle, the view drives it.
  * @property {() => void} destroy - stop the loop and release the renderer and its canvas.
@@ -166,6 +181,9 @@ export function createView(container, object, options = {}) {
   // One traversal, before the first frame: nothing in the assembled graph casts
   // or receives shadows unless the studio asks it to.
   enableObjectShadows(object)
+  // The selection tint is parented to the picked mesh, so it survives a joint
+  // moving that mesh; the view owns it because it is the frame's annotation.
+  const selection = createSelectionHighlight()
 
   const grid = new THREE.GridHelper(radius * 4, 24, 0x7c8698, 0x4a5162)
   grid.position.set(center.x, base, center.z)
@@ -390,7 +408,26 @@ export function createView(container, object, options = {}) {
           material.wireframe = on === true
         }
       })
+      // The tint is not under the model's materials, so it follows the mode here
+      // instead of being swept up by the traversal above.
+      selection.setWireframe(on)
       requestRender()
+    },
+    setSelection(target) {
+      const wasActive = selection.active()
+      const showing = selection.set(target)
+      // A click that highlights nothing and clears nothing leaves the frame as it
+      // was, so it must not pull a frame: an idle viewport stays idle.
+      if (showing === true || wasActive === true) requestRender()
+      return showing
+    },
+    clearSelection() {
+      if (selection.active() === false) return
+      selection.clear()
+      requestRender()
+    },
+    hasSelection() {
+      return selection.active()
     },
     setGridVisible(on) {
       grid.visible = on === true
@@ -423,6 +460,10 @@ export function createView(container, object, options = {}) {
       frameCallbacks.clear()
       pickCallbacks.clear()
       controls.dispose()
+      // The tint copies go before the model they were parented to: the caller
+      // disposes that root's geometry right after this, and a copy still holding
+      // the same buffers would keep them alive.
+      selection.dispose()
       // The rig releases what it added (environment target, lights, ground); the
       // grid is the view's own.
       studio.dispose()
