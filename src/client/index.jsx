@@ -172,8 +172,10 @@ export function apply(ctx) {
   // A model is one self-contained STEP file, so it needs only the door the Files
   // tab already provides: an address and complete bytes. There is no sibling to
   // read back and no injected reader, which is why this registration injects
-  // nothing and the sidebar drop zone still belongs to USD. Both formats end in
-  // their own body but share the same viewport, studio rig and selection tint.
+  // nothing. A model dropped on the sidebar has no address at all, so the
+  // external-asset tab below reads its bytes and mounts the same body. Both
+  // formats end in their own body but share the same viewport, studio rig and
+  // selection tint.
   ctx.effect(
     () => ctx.documentPreviews.register(ifcDefinition(() => t('ifcTitle'))),
     'usd-3d-preview: IFC registry definition',
@@ -184,7 +186,7 @@ export function apply(ctx) {
     locale: NS,
   }, IfcBody)), 'usd-3d-preview: IFC document body')
 
-  // ── external assets: a page tab opened by dropping a stage ─────────────────
+  // ── external assets: a page tab opened by dropping a stage or a model ──────
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: USD_TAB_ID,
     kind: USD_TAB_KIND,

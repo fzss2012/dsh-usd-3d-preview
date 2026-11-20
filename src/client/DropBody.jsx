@@ -8,14 +8,19 @@
  * written: the dropped files live in this component's state for as long as the
  * tab does, and the WASM engine composes the stage from them in a worker.
  *
+ * An IFC model takes the same door with a different reader: a model is one file,
+ * so the page reads its bytes here and mounts `IfcBody` — the same viewport the
+ * Files tab opens by address.
+ *
  * The component owns three states: an empty drop zone, a picker when one drop
- * carries several stages, and the viewport. A drop can arrive at any of them —
+ * carries several models, and the viewport. A drop can arrive at any of them —
  * the document-level listener in `sidebar-drop.js` offers it to the page tab
  * whether it is already open or is being opened right now.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { UsdPreviewGlyph } from './artwork.jsx'
-import { collectDropped, defaultStage, subscribeDropped, takePendingDropped } from './dropped.js'
+import { collectDropped, defaultModel, subscribeDropped, takePendingDropped } from './dropped.js'
+import { IfcBody } from './IfcBody.jsx'
 import { openStage } from './s3open.js'
 import { UsdBody } from './UsdBody.jsx'
 import {
@@ -103,6 +108,36 @@ const S3_INPUT = {
 
 const PICKER = { display: 'flex', flexDirection: 'column', gap: 6, width: '100%', marginTop: 4, maxHeight: 240, overflow: 'auto' }
 
+const STATUS = {
+  position: 'absolute',
+  inset: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 6,
+  padding: 20,
+  textAlign: 'center',
+}
+
+/**
+ * Dictionary lookup with a literal fallback: copy must never be the reason a
+ * viewport fails to render.
+ * @param t - locale binding (absent outside the shell).
+ * @param key - dictionary key.
+ * @param fallback - the copy used when the dictionary has no entry.
+ * @returns the localized string.
+ */
+function labeled(t, key, fallback) {
+  if (typeof t !== 'function') return fallback
+  try {
+    const value = t(key)
+    return value === undefined || value === null || value === key ? fallback : value
+  } catch {
+    return fallback
+  }
+}
+
 /**
  * The button look the viewport toolbar uses, so the drop zone reads as the same
  * surface rather than as a second design.
@@ -123,8 +158,8 @@ function buttonStyle(primary) {
   }
 }
 
-/** A stage key shortened to the name the user recognises. */
-function stageName(key) {
+/** A model key shortened to the name the user recognises. */
+function modelName(key) {
   return key.slice(key.lastIndexOf('/') + 1)
 }
 
@@ -143,15 +178,7 @@ export function UsdDropBody(props) {
   const fileInput = useRef(null)
   const directoryInput = useRef(null)
 
-  const label = useCallback((key, fallback) => {
-    if (typeof t !== 'function') return fallback
-    try {
-      const value = t(key)
-      return value === undefined || value === null || value === key ? fallback : value
-    } catch {
-      return fallback
-    }
-  }, [t])
+  const label = useCallback((key, fallback) => labeled(t, key, fallback), [t])
 
   // A drop offered later — while this tab is already the open one — arrives here.
   useEffect(() => subscribeDropped(() => {
@@ -175,8 +202,8 @@ export function UsdDropBody(props) {
     setUriError(null)
     try {
       const result = await openStage(value)
-      setDrop({ remoteStage: result, stages: [result.label] })
-      setChosen(result.label)
+      setDrop({ remoteStage: result, models: [{ key: result.label, kind: 'usd' }] })
+      setChosen(undefined)
     } catch (error) {
       setUriError(typeof error?.message === 'string' ? error.message : String(error))
     } finally {
@@ -207,27 +234,38 @@ export function UsdDropBody(props) {
     setChosen(undefined)
   }, [])
 
-  const stages = drop?.stages ?? []
-  // One shallowest layer is the stage; two at the same depth are a choice.
-  const activeRoot = chosen ?? defaultStage(stages)
-  const header = activeRoot === undefined ? null : (
+  const models = drop?.models ?? []
+  // One shallowest model is the one to open; two at the same depth are a choice.
+  const activeKey = chosen ?? defaultModel(models)
+  const active = activeKey === undefined ? undefined : models.find(model => model.key === activeKey)
+  const remote = drop?.remoteStage !== undefined
+  // An address-opened stage carries no file map, so only a real model has a kind.
+  const ready = remote || active !== undefined
+  const header = ready === false ? null : (
     <div style={HEADER}>
-      <span style={NAME} title={activeRoot}>{stageName(activeRoot)}</span>
+      <span style={NAME} title={activeKey}>{modelName(activeKey ?? '')}</span>
       <button type="button" style={buttonStyle(false)} onClick={reset}>{label('openAnother', 'Open another asset')}</button>
     </div>
   )
 
-  // One drop carried several stages: let the user choose which one to open.
-  if (drop !== undefined && activeRoot === undefined && stages.length > 1) {
+  // One drop carried several models: let the user choose which one to open.
+  if (drop !== undefined && ready === false && models.length > 1) {
     return (
       <div style={SHELL}>
         <div style={ZONE_WRAP}>
           <div style={{ ...ZONE, alignItems: 'stretch', textAlign: 'left' }}>
-            <span style={ZONE_TITLE}>{label('chooseStage', 'Choose the stage to open')}</span>
-            <div style={PICKER}>
-              {stages.map(key => (
-                <button key={key} type="button" style={{ ...buttonStyle(false), textAlign: 'left' }} onClick={() => setChosen(key)}>
-                  {key}
+            <span style={ZONE_TITLE}>{label('chooseModel', 'Choose the model to open')}</span>
+            <div style={PICKER} data-drop-picker>
+              {models.map(model => (
+                <button
+                  key={model.key}
+                  type="button"
+                  style={{ ...buttonStyle(false), textAlign: 'left' }}
+                  data-drop-model={model.key}
+                  data-drop-kind={model.kind}
+                  onClick={() => setChosen(model.key)}
+                >
+                  {model.key}
                 </button>
               ))}
             </div>
@@ -240,7 +278,7 @@ export function UsdDropBody(props) {
     )
   }
 
-  // A drop that carried no stage at all (a folder of images, a mixed selection).
+  // A drop that carried no model at all (a folder of images, a mixed selection).
   const uriErrorText = uriError === null
     ? null
     : (uriError === 's3-bad-uri' ? label('s3BadUri', 'Bad s3:// URI')
@@ -252,7 +290,7 @@ export function UsdDropBody(props) {
       : uriError === 'stage-bad-uri' ? label('stageBadUri', 'Unrecognized address')
       : label('openUriFailed', 'Could not open the address') + ': ' + uriError)
 
-  const empty = drop === undefined || activeRoot === undefined
+  const empty = ready === false
 
   return (
     <div style={SHELL}>
@@ -260,13 +298,13 @@ export function UsdDropBody(props) {
       <div style={VIEWPORT}>
         {empty ? (
           <div style={ZONE_WRAP}>
-            <div style={ZONE}>
+            <div style={ZONE} data-drop-zone>
               <span style={{ color: ACCENT, lineHeight: 0 }}><UsdPreviewGlyph size={34} /></span>
-              <span style={ZONE_TITLE}>{label('dropTitle', 'Drop a USD asset here')}</span>
+              <span style={ZONE_TITLE}>{label('dropTitle', 'Drop a USD asset or IFC model here')}</span>
               <span style={ZONE_TEXT}>
-                {drop !== undefined && stages.length === 0
-                  ? label('noStage', 'That drop held no USD file (.usd, .usda, .usdc, .usdz).')
-                  : label('dropHint', 'Drag .usd, .usda, .usdc or .usdz from your desktop onto this panel, or pick a file or a folder — a folder brings the layers and textures it references.')}
+                {drop !== undefined && models.length === 0
+                  ? label('noModel', 'That drop held no USD asset or IFC model.')
+                  : label('dropHint', 'Drag .usd, .usda, .usdc, .usdz, .ifc or .ifczip from your desktop onto this panel, or pick a file or a folder — a folder brings the layers and textures a stage references.')}
               </span>
               <div style={ZONE_ACTIONS}>
                 <button type="button" style={buttonStyle(true)} onClick={() => fileInput.current?.click()}>
@@ -296,21 +334,73 @@ export function UsdDropBody(props) {
               <span style={{ color: LABEL_DIM }}>{label('dropLocal', 'Read in this browser only — nothing is uploaded.')}</span>
             </div>
           </div>
+        ) : remote ? (
+          <UsdBody t={t} remoteStage={drop.remoteStage} />
+        ) : active.kind === 'ifc' ? (
+          <DroppedIfcBody t={t} file={drop.files?.get(active.key)} name={modelName(active.key)} />
         ) : (
-          drop.remoteStage !== undefined
-            ? <UsdBody t={t} remoteStage={drop.remoteStage} />
-            : <UsdBody t={t} droppedFiles={drop.files} droppedRootKey={activeRoot} />
+          <UsdBody t={t} droppedFiles={drop.files} droppedRootKey={active.key} />
         )}
       </div>
       <input
         ref={fileInput}
         type="file"
         multiple
-        accept=".usd,.usda,.usdc,.usdz"
+        accept=".usd,.usda,.usdc,.usdz,.ifc,.ifczip"
         onChange={onPicked}
         style={{ display: 'none' }}
       />
       <input ref={directoryInput} type="file" multiple onChange={onPicked} style={{ display: 'none' }} />
     </div>
   )
+}
+
+/**
+ * The viewport for one IFC model a drop carried.
+ *
+ * A dropped model has no address, so the page reads the file's bytes itself and
+ * hands them to the same `IfcBody` the document seat mounts when the model is
+ * opened from the Files tab. The content object is memoised on purpose: the body
+ * reparses whenever that object's identity changes, and one per render would read
+ * the model again on every paint.
+ * @param props.file - the dropped model file.
+ * @param props.name - the name to show for it.
+ * @param props.t - locale binding.
+ * @returns the IFC viewport, or the byte read's loading/failure state.
+ */
+function DroppedIfcBody({ file, name, t }) {
+  const [state, setState] = useState({ kind: 'loading' })
+
+  useEffect(() => {
+    if (file === undefined) {
+      setState({ kind: 'failed', error: new Error('the drop did not carry this model') })
+      return undefined
+    }
+    let cancelled = false
+    setState({ kind: 'loading' })
+    void file.arrayBuffer().then((buffer) => {
+      if (cancelled === true) return
+      setState({ kind: 'ready', data: new Uint8Array(buffer) })
+    }, (error) => {
+      if (cancelled === true) return
+      setState({ kind: 'failed', error })
+    })
+    return () => { cancelled = true }
+  }, [file])
+
+  const content = useMemo(
+    () => (state.kind === 'ready' ? { kind: 'bytes', data: state.data } : undefined),
+    [state],
+  )
+
+  if (state.kind === 'failed') {
+    return (
+      <div style={STATUS} role="alert">
+        <span style={{ color: ERROR, fontWeight: 600 }}>{labeled(t, 'ifcFailed', 'This IFC file could not be read.')}</span>
+        <span style={{ color: LABEL_DIM, wordBreak: 'break-word' }}>{String(state.error?.message ?? state.error)}</span>
+      </div>
+    )
+  }
+  if (content === undefined) return <div style={STATUS}>{labeled(t, 'ifcLoading', 'Reading the IFC model…')}</div>
+  return <IfcBody t={t} content={content} resourceAddress={name} />
 }

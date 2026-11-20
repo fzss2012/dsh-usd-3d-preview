@@ -387,7 +387,7 @@ export function UsdObjectStoreBody(props) {
           read: objectReader(rootKey),
           readAsset: objectAssetReader,
         },
-        stages: [entry.name || rootKey],
+        models: [{ key: entry.name || rootKey, kind: 'usd' }],
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))

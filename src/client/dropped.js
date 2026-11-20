@@ -8,11 +8,16 @@
  * the drop path reuses the same composition the workspace path uses, with
  * references, sublayers and textures resolved from the dropped files.
  *
+ * An IFC model is the other thing a drop can carry. It is one self-contained
+ * STEP file rather than a set of layers, so it needs no composition: the drop
+ * lists it beside the USD stages and the page tab opens the chosen one by bytes.
+ *
  * Chrome reports dropped directories only through the entry API, and reports at
  * most 100 children per `readEntries` call, so collection is a recursive walk
  * that keeps reading until a directory is empty.
  */
 import { retypeCustomInstancers, stripBom } from './engine.js'
+import { isIfcName } from './ifc.js'
 import { USD_EXTENSIONS } from './usd.js'
 
 /** Suffixes this preview opens. */
@@ -32,6 +37,28 @@ const encoder = new TextEncoder()
 export function isUsdName(name) {
   const dot = String(name).lastIndexOf('.')
   return dot >= 0 && USD_SUFFIXES.has(String(name).slice(dot + 1).toLowerCase())
+}
+
+/**
+ * Whether one file name is a model this preview opens by bytes.
+ *
+ * A USD layer is composed from the files beside it; an IFC model is read whole
+ * from its one file. Both reach the page the same way, so the drop offers both
+ * and the page tab decides which reader opens the one that was chosen.
+ * @param name - a dropped file's name, with or without its directory.
+ * @returns true for a USD layer or an IFC model, in any case.
+ */
+export function isModelName(name) {
+  return isUsdName(name) || isIfcName(name)
+}
+
+/**
+ * Which reader opens a dropped key.
+ * @param key - a dropped file's package-relative key.
+ * @returns `ifc` for a model, `usd` for a layer.
+ */
+export function modelKindOf(key) {
+  return isIfcName(key) ? 'ifc' : 'usd'
 }
 
 /**
@@ -55,36 +82,42 @@ function depthOf(key) {
 }
 
 /**
- * The stages a drop can open, shallowest first.
+ * The models a drop can open, shallowest first.
  *
  * A folder that holds one root layer next to the layers it references (the
  * usual SimReady/unit layout) yields the root first and the referenced layers
- * after it, while a folder with several independent stages yields all of them in
- * a stable order for the picker.
+ * after it, while a folder with several independent items yields all of them in
+ * a stable order for the picker. Two models at one depth keep USD before IFC,
+ * because a mixed folder is a USD asset that happens to carry a model beside it
+ * far more often than the reverse.
  * @param files - collected files by key.
- * @returns the keys of the USD layers, ordered by depth then name.
+ * @returns the models, each with the reader that opens it, ordered by depth,
+ * then kind, then name.
  */
-export function stageCandidates(files) {
+export function modelCandidates(files) {
   return [...files.keys()]
-    .filter(isUsdName)
-    .sort((left, right) => depthOf(left) - depthOf(right) || left.localeCompare(right))
+    .filter(isModelName)
+    .map(key => ({ key, kind: modelKindOf(key) }))
+    .sort((left, right) => depthOf(left.key) - depthOf(right.key)
+      || (left.kind === right.kind ? 0 : left.kind === 'usd' ? -1 : 1)
+      || left.key.localeCompare(right.key))
 }
 
 /**
- * The stage a drop opens without asking.
+ * The model a drop opens without asking.
  *
- * A folder that holds one stage beside the layers it references needs no picker:
- * referenced layers sit deeper than the root, so the unique shallowest layer is
- * the stage. Two layers at that depth are two independent stages, and the page
- * asks which one to open instead of guessing.
- * @param stages - candidates in the order {@link stageCandidates} produced.
- * @returns the layer to open, or undefined when the drop needs a choice.
+ * A folder that holds one model beside the layers it references needs no picker:
+ * referenced layers sit deeper than the root, so the unique shallowest entry is
+ * the one to open. Two models at that depth are two independent models, and the
+ * page asks which one to open instead of guessing.
+ * @param models - candidates in the order {@link modelCandidates} produced.
+ * @returns the key to open, or undefined when the drop needs a choice.
  */
-export function defaultStage(stages) {
-  if (stages.length === 0) return undefined
-  const depth = stages[0].split('/').length
-  const shallow = stages.filter(stage => stage.split('/').length === depth)
-  return shallow.length === 1 ? shallow[0] : undefined
+export function defaultModel(models) {
+  if (models.length === 0) return undefined
+  const depth = depthOf(models[0].key)
+  const shallow = models.filter(model => depthOf(model.key) === depth)
+  return shallow.length === 1 ? shallow[0].key : undefined
 }
 
 /** Whether a file's bytes are ASCII USD, so a text-level fix applies to them. */
@@ -156,7 +189,7 @@ async function walkEntry(entry, prefix, files) {
  * Collect every file a drop carries into the engine's file map.
  * @param dataTransfer - the drop's data transfer (or a `{ files }` stand-in from
  * a picker).
- * @returns the files by package-relative key and the stages among them.
+ * @returns the files by package-relative key and the models among them.
  */
 export async function collectDropped(dataTransfer) {
   const files = new Map()
@@ -180,16 +213,16 @@ export async function collectDropped(dataTransfer) {
     const normalized = await normalizeLayer(key, file)
     if (normalized !== file) files.set(key, normalized)
   }
-  return { files, stages: stageCandidates(files) }
+  return { files, models: modelCandidates(files) }
 }
 
 /**
  * Whether a drag carries something this preview opens.
  *
  * Runs on every `dragover` over the sidebar, so it stays allocation-light and
- * answers from the entry API: a directory may hold a stage, and a USD name is a
- * stage. Anything else (a PDF, an image, a URL) keeps the shell's attachment
- * behaviour.
+ * answers from the entry API: a directory may hold a stage or a model, and a USD
+ * or IFC name is one. Anything else (a PDF, an image, a URL) keeps the shell's
+ * attachment behaviour.
  * @param dataTransfer - the drag's data transfer.
  * @returns true when the drop belongs to this preview.
  */
@@ -200,11 +233,11 @@ export function acceptsDroppedAsset(dataTransfer) {
     const entry = item.webkitGetAsEntry?.()
     if (entry !== undefined && entry !== null) {
       if (entry.isDirectory === true) return true
-      if (isUsdName(entry.name)) return true
+      if (isModelName(entry.name)) return true
       continue
     }
     const file = item.getAsFile?.()
-    if (file !== undefined && file !== null && isUsdName(file.name)) return true
+    if (file !== undefined && file !== null && isModelName(file.name)) return true
   }
   return false
 }

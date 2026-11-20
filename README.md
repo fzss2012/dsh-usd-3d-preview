@@ -357,27 +357,31 @@ self-contained.
 ### External assets (drag and drop)
 
 `lib/client.js` also registers a page tab, `usd-3d-preview`, whose body
-([`src/client/DropBody.jsx`](src/client/DropBody.jsx)) opens a stage that is not in the workspace:
+([`src/client/DropBody.jsx`](src/client/DropBody.jsx)) opens a USD stage or an IFC model that is not
+in the workspace:
 
-1. the card appears in the sidebar guide (`USD 三维预览`, after Files and before Terminal) and
+1. the card appears in the sidebar guide (`三维预览`, after Files and before Terminal) and
    opens the drop zone with one click;
 2. a file drag anywhere over the right Sidebar panel is claimed in the capture phase
-   ([`src/client/sidebar-drop.js`](src/client/sidebar-drop.js)) — dashed outline, `松开以在 USD
-   预览中打开` hint — and on drop the page tab opens with the asset. Claiming it there is
+   ([`src/client/sidebar-drop.js`](src/client/sidebar-drop.js)) — dashed outline, `松开以在预览中
+   打开` hint — and on drop the page tab opens with the asset. Claiming it there is
    deliberate: the conversation's attachment drop listens on the same document and accepts drops
    across the whole page, so without the capture listener a stage dropped on the sidebar would
    attach itself to the next prompt instead;
 3. a dropped **folder** brings the layers and textures the stage references (Chrome's entry API,
    walked recursively), so a SimReady/unit layout composes exactly as it does on disk;
-4. one shallowest layer opens by itself; two stages at the same depth produce a picker instead of
-   a guess; a folder with no USD file says so instead of silently doing nothing;
+4. one shallowest model opens by itself; two models at the same depth produce a picker instead of
+   a guess; a folder with no USD file or IFC model says so instead of silently doing nothing;
 5. `.usdz` packages, `.usdc` crates and ASCII layers all take the same path, and the drop zone's
-   *Choose file* / *Choose folder* buttons feed the same collection code.
+   *Choose file* / *Choose folder* buttons feed the same collection code;
+6. an `.ifc` or `.ifczip` file mounts the IFC viewport instead: the page reads the model's own
+   bytes and hands them to the same `IfcBody` the Files tab mounts, so a dropped model reports its
+   schema, its elements, its meshes and its measured extent exactly like an opened one.
 
 Bytes stay in the page: no upload, no workspace write, no host route. The panel header names the
-opened layer and *Open another asset* goes back to the zone. The only thing the browser needs is
-the bundle — the same WASM engine composes the dropped stage. (A pasted address is different: it
-does read through the read-only routes below.)
+opened asset and *Open another asset* goes back to the zone. The only thing the browser needs is
+the bundle — the same WASM engine composes a dropped stage, and the same web-ifc worker reads a
+dropped model. (A pasted address is different: it does read through the read-only routes below.)
 
 ### Opening a stage by address
 
@@ -542,7 +546,7 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer, web-ifc
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # objstore + update + instancer + register + drop + prim-tree + selection + details + parse + s3 + articulation + studio + articulation-render + render
+npm test               # objstore + update + instancer + register + drop + prim-tree + selection + details + parse + s3 + articulation + studio + drop-ifc-render + articulation-render + render
 npm run update:local   # update this checkout from its upstream and rebuild (see below)
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
@@ -654,7 +658,8 @@ terminal update plus a host restart, because the route is itself part of the new
 |---|---|
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
 | `instancer` | the custom-type rewrite in isolation: a prim whose **own** fields carry `protoIndices` and `prototypes`/`positions` is promoted, a custom group around an instancer is not, and a prim with only part of the signature stays untouched — the container case is what protects a nested custom-instancer library |
-| `drop` | the external-asset path without a browser: name/key helpers, stage candidates and the auto-open rule, BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, picker collection, and the capture-phase sidebar listener against a faked document (USD drag claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
+| `drop` | the external-asset path without a browser: name/key helpers, **the model candidates and the auto-open rule across both formats** (`usd` before `ifc` at one depth), BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, an IFC model handed over unrewritten, picker collection, and the capture-phase sidebar listener against a faked document (USD and IFC drags claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
+| `drop-ifc-render` | **real Chromium + WebGL**: the real `UsdDropBody` mounts a pending drop, so the path from "the sidebar handed over files" to "a lit model" is production code — a dropped `.ifc` reaches the IFC reader (schema, element count, measured extent, non-flat frame) rather than the USD body, a two-model drop opens its picker and reads the chosen one, a drop with no model says so, and a file merely named `.ifc` reaches the failure state instead of hanging |
 | `prim-tree` | the prim-path hierarchy in isolation: natural numeric ordering, tree building with copyable ancestor folders, ancestor-preserving filtering, bounded flattening with an honest total, and picked-path ancestor reveal |
 | `details` | the prim-details reader in isolation, no browser: declared types (`point3f[]`, `int[]`, `token`, never a JavaScript type), `custom` / `uniform` modifiers, `kind` and `apiSchemas`, relationships with resolved targets, **ASCII and crate agreeing on every attribute of the same stage**, a long array summarised by its true element count instead of materialised (and counted as elements, not components), a declared-but-unset attribute keeping its type, **a prim a `references` arc re-roots found under its composed path with its authored path reported**, a `subLayers` layer contributing at the same path, a UTF-8 BOM staying a text layer, the no-layer-bytes / no-such-prim answers staying distinct, and the panel's ordering and value-formatting rules |
 | `selection` | the selection highlight in isolation, no browser: one tint copy parented to the picked mesh and sharing its geometry (so a joint carries it and no vertex is duplicated), the copy refusing to be raycast, one placement of an instanced batch tinted rather than the batch, groups/points/lines refused instead of invented, the wireframe mode reaching a tint created after it, the source's face policy mirrored onto the tint both ways (`DoubleSide` kept, `FrontSide` taken back off the shared material), and `dispose()` releasing only its own material — never the caller's geometry |
@@ -717,9 +722,10 @@ geometries / 180 triangles, 8 × 6.6 × 6 m); `ifc/not-ifc.ifc` is plain prose b
   its geometry both live in the worker until the tab closes. A very large model is therefore
   bounded by the browser's heap, not by the Host's read caps — the same trade a dropped USD
   asset makes, for the same reason.
-- **There is no IFC by drop yet.** A model opens from the Files tab by address, which is what
-  the document-preview registry offers. The sidebar drop zone still belongs to USD; an IFC file
-  dropped there reports that it carries no stage.
+- **A dropped IFC model is read by the page.** The external-asset tab reads the file's bytes with
+  the browser's own `File` API and mounts the same IFC viewport the Files tab mounts, so a model
+  and a dropped stage share one door and keep two readers. Like a dropped stage it has no address:
+  dropping it again reopens it.
 - **The colour is a surface style, not a material.** IFC's `IfcSurfaceStyle` carries a colour
   and (optionally) a transparency; it has no roughness, metalness or texture channels this
   viewport reads, so every surface is drawn with one fixed roughness. A model whose appearance
@@ -786,7 +792,7 @@ geometries / 180 triangles, 8 × 6.6 × 6 m); `ifc/not-ifc.ifc` is plain prose b
 - **A dropped asset is read by the browser.** Its size is bounded by memory rather than the
   Host's read caps; the engine still enforces its own `maxLayerBytes` / `maxTextureBytes` /
   `maxTriangles` limits.
-- **A dropped stage is a page tab, not a document.** It has no resource address, so the layout
+- **A dropped asset is a page tab, not a document.** It has no resource address, so the layout
   cannot restore it after a reload and it never appears in the Files-tab history; dropping the
   asset again reopens it.
 - **References must resolve inside what was opened.** For a workspace file the reference must be
@@ -822,7 +828,7 @@ This plugin reads **local bytes only** — workspace files through the host's Re
 the user drops on the sidebar through the browser's own file API — plus, when explicitly
 configured through `DSH_USD_S3_*` environment variables, **read-only objects from an
 S3-compatible object storage**. It mounts previews for six file extensions
-(`.usd`/`.usda`/`.usdc`/`.usdz` and `.ifc`/`.ifczip`) and a drop entry for the USD four, and
+(`.usd`/`.usda`/`.usdc`/`.usdz` and `.ifc`/`.ifczip`), one drop entry for those six, and
 nothing else: no uploads, no workspace writes, no credentials stored in the package, and no
 configuration files.
 
@@ -858,9 +864,10 @@ MIT — see [LICENSE](LICENSE).
 以及该 prim 来自哪些图层（多层时逐条属性标注取值来自哪一层）；被 `references` / `payload` 重新挂载的
 prim 会按图层里真实书写的路径回读，并同时标出组合后的路径与原路径；超长数组只报元素个数与前几项
 （`point3f[482] (…)`），因此读取大资产的几何图层也是一次分隔符扫描，不会把整层解析进内存。
-外部资产（桌面上的文件或文件夹）可以直接拖到右侧边栏打开：侧边栏「开始」页有「USD 三维预览」
+外部资产（桌面上的文件或文件夹）可以直接拖到右侧边栏打开：侧边栏「开始」页有「三维预览」
 入口卡片，拖拽落在侧边栏面板上即会打开预览标签页，文件夹会连同被引用的图层和贴图一起读取；
-字节只在浏览器内处理，不上传、不写入工作区。
+`.ifc` / `.ifczip` 走同一个入口，由页面直接读取模型字节并挂载同一个 IFC 视口（与 Files 标签
+按地址打开的是同一套读取器）。字节只在浏览器内处理，不上传、不写入工作区。
 **IFC 模型**是同一套视口的第二个格式：STEP 文件由 web-ifc（WebAssembly）在独立的 Worker 里解析，
 被 gzip 压缩后随客户端 bundle 一起下发（首次使用时用 `DecompressionStream` 解压，因此 bundle 只多约
 1.0 MiB 而不是 6.8 MiB）。每个构件的摆放矩阵在 Worker 里就乘好（web-ifc 的 `flatTransformation`
