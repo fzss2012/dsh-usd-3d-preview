@@ -19,6 +19,13 @@
  * module loads, so it must be set before the bundle runs.
  */
 import { normalizePath } from './remote.js'
+import {
+  directObjectUrl,
+  fetchDirectBytes,
+  hasDirect,
+  listDirect,
+  searchDirect,
+} from './directS3.js'
 
 /** Absolute origin for the object-storage routes, or '' for the page's own. */
 const ASSET_ORIGIN = (() => {
@@ -180,6 +187,7 @@ export async function listPrefix(prefix, signal, continuationToken) {
   const token = typeof continuationToken === 'string' ? continuationToken : ''
   return await withSignal(
     cached(listCache, text + '\u0000' + token, async () => {
+      if (hasDirect()) return await listDirect(text, token, undefined)
       const library = await hostLibrary()
       if (library !== undefined) {
         const params = new URLSearchParams({ prefix: text })
@@ -210,6 +218,7 @@ export async function searchFiles(prefix, query, usdOnly, signal, limit = 200) {
   })
   const path = params.toString()
   return await withSignal(cached(searchCache, path, async () => {
+    if (hasDirect()) return await searchDirect(prefix ?? '', query ?? '', usdOnly !== false, limit, undefined)
     const library = await hostLibrary()
     if (library !== undefined) return await getJson(HOST_SEARCH + '?' + path)
     return await getJson(ASSET_ORIGIN + API_SEARCH + '?' + path)
@@ -234,6 +243,17 @@ export const OBJECT_TIMEOUT_MS = 30_000
  * @returns object bytes.
  */
 export async function fetchObjectBytes(key, signal) {
+  if (hasDirect()) {
+    try {
+      return await fetchDirectBytes(key, signal)
+    } catch (error) {
+      if (error?.name === 'AbortError' || signal?.aborted === true) throw error
+      if (error?.message === 'direct-not-found') throw new Error('objstore-not-found')
+      if (error?.message === 'direct-too-large') throw new Error('objstore-too-large')
+      if (error?.message === 'direct-forbidden') throw new Error('objstore-forbidden')
+      // A CORS or network failure falls through to the host/gateway.
+    }
+  }
   const library = await hostLibrary()
   if (library !== undefined) {
     const controller = new AbortController()
@@ -282,6 +302,10 @@ export async function fetchObjectBytes(key, signal) {
  * @returns an absolute URL, or the gateway's page-relative route.
  */
 export function publicAssetUrl(key, library) {
+  if (hasDirect()) {
+    const url = directObjectUrl(key)
+    if (url !== undefined) return url
+  }
   if (library !== undefined && typeof library.endpoint === 'string' && library.endpoint !== '') {
     const bucket = typeof library.bucket === 'string' && library.bucket !== '' ? library.bucket : 'asset'
     return library.endpoint.replace(/\/+$/, '') + '/' + encodeKey(bucket) + '/' + encodeKey(key)
@@ -299,6 +323,16 @@ export function s3Uri(bucket, key) {
   const name = String(bucket ?? '').trim() || 'asset'
   return 's3://' + name + '/' + normalizePath(key)
 }
+
+/** Re-export the browser-direct connection helpers for the sidebar UI. */
+export {
+  clearDirect,
+  configureDirect,
+  directConfig,
+  directS3Uri,
+  hasDirect,
+  testDirect,
+} from './directS3.js'
 
 /** Human-friendly byte count. */
 export function formatBytes(value) {
