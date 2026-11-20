@@ -1,13 +1,23 @@
 # dsh-usd-3d-preview
 
-**OpenUSD in the browser.** A document preview for `.usd` / `.usda` / `.usdc` / `.usdz`
-that opens a USD stage in a side panel of the DeepSeek Harness (DSH) and draws it in
-WebGL with a studio-lit viewport — orbit camera, a studio lighting rig with shadows,
-reference grid, and the measured bounding-box size. Authored `UsdPhysics` joints and
-colliders make the stage **interactive**: click a part to open or close it, drive the
-whole mechanism from a toolbar. Optional read-only object-storage support resolves
-`s3://` references through a signed host route. No converter process, no upload, no
-native toolchain.
+**OpenUSD and IFC in the browser.** A document preview for `.usd` / `.usda` / `.usdc` /
+`.usdz` and for `.ifc` / `.ifczip`, opening either kind of file in a side panel of the
+DeepSeek Harness (DSH) and drawing it in WebGL with a studio-lit viewport — orbit camera, a
+studio lighting rig with shadows, reference grid, and the measured bounding-box size.
+Authored `UsdPhysics` joints and colliders make a USD stage **interactive**: click a part to
+open or close it, drive the whole mechanism from a toolbar. An IFC model brings its own
+schema instead: a spatial tree of products, their property sets, and the surface styles it
+authored. Optional read-only object-storage support resolves `s3://` references through a
+signed host route. No converter process, no upload, no native toolchain.
+
+Two formats, two readers, one viewport. A **USD stage** is composed by OpenUSD itself — a
+pure-Rust build compiled to WebAssembly (`@huggingface/usd-web-viewer`, MIT) resolves
+sublayers, references, payloads, variants and instancers in a Web Worker. An **IFC model** is
+a STEP physical file read by **web-ifc** (`web-ifc`, MPL-2.0), a schema-aware parser compiled
+to WebAssembly, in a worker of its own. Both hand three.js a graph; both are drawn by the same
+studio rig, picked by the same raycaster, and framed by the same camera code. What differs is
+what the format *is*: a prim graph with composition arcs, or a spatial structure with property
+sets — so each has its own inspector panel.
 
 The important part is that **OpenUSD itself does the composition**: a pure-Rust build of
 OpenUSD compiled to WebAssembly (`@huggingface/usd-web-viewer`, MIT) composes the stage in
@@ -25,10 +35,16 @@ It is one package in two halves: a **dsh bundle** and a **browser client plugin*
 ```
 dsh-usd-3d-preview
 ├─ lib/index.js            host half (ESM; the trust-fenced asset/health/update routes)
-├─ lib/client.js           browser half (classic-CJS module-table entry; three, the WASM engine,
-│                          articulation/kinematics and the studio view are inlined)
+├─ lib/client.js           browser half (classic-CJS module-table entry; three, both WASM
+│                          engines, articulation/kinematics and the studio view are inlined)
 ├─ src/                    the only source of truth: host/ + client/
-├─ tests/                  fourteen suites (including real Chromium pixel tests) + fixtures
+│    ├─ client/usd.js      USD definition + address helpers
+│    ├─ client/ifc.js      IFC definition + container/path helpers (no engine imports)
+│    ├─ client/ifc-worker.js       the STEP reader, bundled with web-ifc
+│    ├─ client/ifc-worker-boot.js  the small script that inflates and starts it
+│    ├─ client/ifc-engine.js       worker handle + the three graph it builds
+│    └─ client/IfcBody.jsx         the IFC viewport and its element panel
+├─ tests/                  sixteen suites (including real Chromium pixel tests) + fixtures
 └─ cordis.patch.yml        bundle patch layer: one `ui-usd-3d-preview` entry
 ```
 
@@ -51,6 +67,8 @@ composes, and the plugin feeds it the bytes of every layer the stage names.
 ## Support matrix
 
 Measured by `npm test` (fixtures are committed; the render suites draw them in Chromium).
+
+### USD (`.usd` / `.usda` / `.usdc` / `.usdz`)
 
 | Input | WASM engine (default) | Fallback (three) |
 |---|---|---|
@@ -77,6 +95,7 @@ Measured by `npm test` (fixtures are committed; the render suites draw them in C
 | Studio rendering | ✅ Khronos PBR Neutral tone mapping, PMREM environment, 4 rect lights, 2048² shadows, lit ground disc, on-demand draw | ✅ same view |
 | Selection highlight | ✅ the picked object is re-tinted in the accent under an instanced/parented copy; Esc, the panel's × or a background click clears it | ✅ same pick path — a stage the fallback composed is still clickable, but only names a prim when the engine kept the paths |
 | `s3://` asset-layer references | ✅ ASCII layers localized + prefetched through the host route (object storage must be configured) | ❌ |
+| Object-storage browser | ✅ the sidebar lists the configured bucket through the host's signed routes (`DSH_USD_S3_ROOT_PREFIX` confines it), searches recursively, and hands a stage to the preview | ❌ |
 
 The stats line at the bottom of the panel reports **engine / layer count / warning count**, and
 the warnings are listed by engine code (`layer-missing`, `composition`, `material-fallback`,
@@ -85,6 +104,44 @@ answered by the panel instead of by guesswork. Meshes and triangles are counted 
 an `InstancedMesh` is multiplied by its instance count and reported on its own "instances" line.
 With an articulated asset the panel also reports the number of moving parts in
 `data-usd-parts`, and the toolbar only appears when parts were actually read.
+
+### IFC (`.ifc` / `.ifczip`)
+
+| Input | What the preview does |
+|---|---|
+| `.ifc` (STEP physical file, ASCII) | ✅ read by **web-ifc** in a Web Worker: the schema (IFC2X3 / IFC4 / IFC4X3) is detected from the header and the model is parsed against it |
+| `.ifczip` (zip package) | ✅ unzipped, root model taken as the shallowest `.ifc` member |
+| Container detection | decided by the **leading bytes** (`ISO-10303-21`, or a zip signature), never by the extension — a UTF-8 BOM in front of the prologue is tolerated |
+| Length unit | ✅ the file's authored unit (`mm`/`cm`/`m`/`ft`/…) is reported in the stats; web-ifc converts every coordinate to metres, so the model is drawn at its real size |
+| Placement / `IfcLocalPlacement` chain | ✅ the full placement transform is applied in the worker, so the page receives world-space triangles |
+| `IfcProduct` tree (`IfcRelAggregates` + `IfcRelContainedInSpatialStructure`) | ✅ the spatial structure is read from both relation kinds and shown as a filterable tree; a product no relation reaches is a root of its own rather than a lost row |
+| Surface styles (`IfcSurfaceStyle` → `IfcColourRgb`) | ✅ drawn in the authored colour, shared per colour so a 5000-wall model compiles few programs; an unstyled model is drawn in a neutral grey rather than black |
+| Property sets (`IfcPropertySet`, `IfcElementQuantity`) | ✅ listed per element in the details panel, with each property's declared IFC type |
+| Picking / selection | ✅ a click names the element under the cursor (its tree path) and tints it |
+| `IfcOpeningElement` / booleans | ✅ resolved by web-ifc's geometry kernel; the void is cut, not drawn |
+| Drawable geometry only | ✅ a property-only exchange (no representations) reports that it has none instead of showing an empty stage |
+
+The IFC stats line reports **schema / element count / mesh count / triangle count / size**, plus
+the authored unit when it is not metres. The panel's element count is the number of objects the
+spatial structure carries, in `data-ifc-elements`; the schema is in `data-ifc-schema`.
+
+### Why IFC is a second preview implementation and not a suffix on the USD one
+
+The two formats share a viewport and nothing else. A USD stage is *composed* by an engine that
+resolves composition arcs; an IFC model is *parsed* by a schema-aware reader against a fixed
+schema. One implementation for both would mean every USD path carrying an "unless this is IFC"
+branch, and the two inspector panels answer different questions — a prim path and its authored
+declarations, or an express ID and its property sets. What is genuinely common is kept common:
+`createView` (camera, orbit, on-demand draw), `studio.js` (the lighting rig), `selection.js`
+(the accent tint), `prim-tree.js` (the path hierarchy), and the token palette. Everything below
+`assemble()` is per-format.
+
+The element tree is the clearest example of the split. An IFC model's root is an
+`IfcProject`, which is an **`IfcObjectDefinition` but not an `IfcProduct`** — so the walk is
+driven from `IfcObjectDefinition`, and a structure walk that started from products would lose the
+project and, with it, the whole site/building/storey chain. That is not a theoretical concern: it
+is the bug the committed `building.ifc` fixture caught, and the offline suite pins the shape as
+data so it cannot come back.
 
 ## Architecture
 
@@ -121,13 +178,40 @@ Files tab click                    drag a file/folder onto the sidebar
                               readAsset  (host route)      → s3:// object bytes
 ```
 
-Everything that crosses a boundary is injected rather than imported: the body receives
+The IFC half is a second, smaller pipeline into the same viewport:
+
+```
+Files tab click (.ifc)             (an IFC model is one self-contained STEP file:
+   │                                no siblings, no read-back loop, no reader)
+   ├─ documentPreviews
+   │     id: dsh-usd-3d-preview/ifc
+   │     extensions: ifc ifczip
+   │
+   └─ sidebar.right.tab.document
+         (keyed body: IfcBody)
+                │
+                ├─ loadIfc()  ─── Web Worker (src/client/ifc-worker.js) ─── web-ifc
+                │      │                ▲
+                │      │                └── inflates the engine + WASM from the bundle
+                │      │                    (src/client/ifc-worker-boot.js → DecompressionStream)
+                │      ├─ geometry: world-space triangles, placement applied in the worker,
+                │      │     Z-up → Y-up, one BufferGeometry per placed geometry
+                │      └─ structure: IfcRelAggregates + IfcRelContainedInSpatialStructure
+                │            → flat records → src/client/ifc-engine.js structureToPaths()
+                │
+                └─ createView()  — the same view, rig, pick and selection tint as USD
+```
+
+Everything that crosses a boundary is injected rather than imported: the USD body receives
 `readLayer` and `readAsset`, so the assembly is testable without a host and the workspace
-Remote remains the only component that knows how to locate a sibling file. `index.jsx`
-registers six reversible effects — the dictionaries, the preview definition, the keyed
-document body, the sidebar page type (with its guide card), its tab body, and the sidebar
-drop watcher — through public client services only (`documentPreviews`, `sidebarRightTabs`,
-`sidebarRight`, `slots`, `locale`, `remote.workspaceFiles`).
+Remote remains the only component that knows how to locate a sibling file. (The IFC body needs
+no reader at all — a model is one file — which is why its registration injects nothing, and why
+the offline suite asserts that absence.) `index.jsx` registers thirteen reversible effects —
+the dictionaries, both preview definitions, both keyed document bodies, the sidebar page type
+(with its guide card), its tab body, the sidebar drop watcher, the object-storage page type and
+body, and the three update surfaces — through public client services only
+(`documentPreviews`, `sidebarRightTabs`, `sidebarRight`, `slots`, `locale`,
+`remote.workspaceFiles`).
 
 ### The read-back loop
 
@@ -148,9 +232,30 @@ so it stays a warning in the panel rather than an exception that blanks the stag
 
 Both the worker script and the `.wasm` binary travel inside `lib/client.js` as base64 and
 become blob URLs at first use. This is deliberate: a client plugin ships as one module-table
-entry and cannot assume a host route for two extra files. It costs ~3 MiB of bundle size, and
-`lib/client.js` ends up around 5.0 MiB (three ≈ 1.4 MiB + engine ≈ 2.2 MiB of WASM +
-articulation/kinematics and the studio view).
+entry and cannot assume a host route for two extra files. The USD engine alone costs ~3 MiB of
+bundle size (three ≈ 1.4 MiB + engine ≈ 2.2 MiB of WASM + articulation/kinematics and the studio
+view).
+
+### The IFC engine, and why it is gzipped
+
+The IFC reader has the same packaging problem with a bigger number: web-ifc's bundle is 3.5 MiB
+minified and its WASM binary 1.6 MiB. Base64 of those raw bytes would add **6.8 MiB** to a
+bundle that is already ~5.3 MiB. The shell serves a client plugin as one *uncompressed*
+JavaScript file, so the bytes are gzipped before they are embedded — 0.4 MiB and 0.6 MiB — and
+a 3 KiB bootstrap (`src/client/ifc-worker-boot.js`) inflates them in the worker with the
+platform's own `DecompressionStream` before handing control to the engine. The finished bundle
+is ≈ 6.9 MiB instead of ≈ 15.8 MiB.
+
+The bootstrap also solves a race: `new Worker(url)` has no constructor argument, and the WASM
+location must exist before the first `open`. So the page posts the two payloads as a
+`configure` message and the bootstrap **queues** anything that arrives before the inflation
+finishes, rather than dropping it. A message that vanished would look like a hung model.
+
+One design consequence worth naming: the worker applies each product's placement transform and
+the Z-up → Y-up rotation **before** the geometry crosses the boundary, so the page receives
+world-space triangles and builds a flat graph. That is what makes the stats line, the raycaster
+and the camera framing all agree with what is drawn, with no intermediate transform for any of
+them to walk through.
 
 ## Interactive USD
 
@@ -229,6 +334,13 @@ are stored or logged:
 | `DSH_USD_S3_SECRET_KEY` | secret access key (required) |
 | `DSH_USD_S3_BUCKET` | bucket the `s3://` URIs name (default `asset`) |
 | `DSH_USD_S3_REGION` | SigV4 signing region (default `us-east-1`) |
+| `DSH_USD_S3_ROOT_PREFIX` | key prefix the sidebar browser is confined to (default: the whole bucket) |
+
+`DSH_USD_S3_ROOT_PREFIX` is what makes the object-storage tab usable against a bucket whose
+listing is not public: set it to the directory you actually work in — `Component/`, `Component`
+and `s3://asset/Component` are all accepted — and the sidebar opens there. The page can never
+list outside that prefix, and `..` is refused rather than clamped, so the browser never reaches a
+key the operator did not expose.
 
 Object bytes are cached in `$DSH_HOME/cache/usd-assets/` (a bounded LRU in memory — 64
 entries / 128 MiB — plus a best-effort disk copy; a read-only cache directory never breaks a
@@ -289,8 +401,20 @@ the root.
 
 `lib/client.js` registers a second page tab, `usd-objstore`
 ([`src/client/ObjStoreBody.jsx`](src/client/ObjStoreBody.jsx)), whose guide card sits **before** the
-USD preview card: browsing is the source, previewing is where one object ends up. It reads a
-read-only listing API and offers:
+USD preview card: browsing is the source, previewing is where one object ends up.
+
+It has two backends, and picks one per page:
+
+1. **The host half (no extra deployment).** When `DSH_USD_S3_*` is configured,
+   `GET /api/usd-preview/list` and `GET /api/usd-preview/search` list with the host's own SigV4
+   credentials — the same trust-fenced `/api` channel the signed asset read uses. The browser
+   never holds a credential, and the listing works against a bucket that denies anonymous
+   `ListBucket`, which is the common MinIO/S3 configuration: anonymous `GET` of an object may be
+   allowed while listing is not.
+2. **A deployment gateway.** When the host has no library, the page falls back to the
+   `/usd-asset-api/*` routes below, for a deployment that terminates them elsewhere.
+
+Either backend offers:
 
 - a lazy directory tree with breadcrumbs, per-folder filtering and refresh;
 - **recursive search** of the current prefix — USD-only by default (`.usd/.usda/.usdc/.usdz`), with
@@ -299,8 +423,9 @@ read-only listing API and offers:
   channel the sidebar drag uses; referenced layers are then read through the readers below),
   copy `s3://` URI, copy https URL, open in browser.
 
-The listing API is **deployment-provided**: this repository ships the page, not the gateway that
-terminates the routes. The page calls them on its own origin by default:
+The host routes need nothing beyond `DSH_USD_S3_*`. The gateway routes are **deployment-provided**:
+this repository ships the page, not the gateway that terminates them, and they are only consulted
+when the host has no library. The page calls them on its own origin by default:
 
 | Page route | Meaning |
 |---|---|
@@ -313,12 +438,12 @@ the host signing route (`/api/usd-preview/asset`), with the gateway's byte route
 JSON the page expects:
 
 ```jsonc
-// GET /usd-asset-api/list
-{ "bucket": "asset", "prefix": "samples/", "allowedPrefixes": ["samples/"],
-  "entries": [{ "key": "samples/window.usda", "name": "window.usda",
+// GET /api/usd-preview/list  (and the gateway's /usd-asset-api/list)
+{ "bucket": "asset", "prefix": "Component/", "rootPrefix": "Component/",
+  "entries": [{ "key": "Component/window.usda", "name": "window.usda",
                 "type": "file", "size": 130380, "lastModified": "2026-11-01T10:00:00Z" }],
-  "truncated": false }
-// GET /usd-asset-api/search
+  "truncated": false, "continuationToken": null }
+// GET /api/usd-preview/search  (and the gateway's /usd-asset-api/search)
 { "entries": [ /* the same entry shape */ ], "scanned": 42, "truncated": false }
 ```
 
@@ -330,8 +455,9 @@ bundle runs, and that origin must answer CORS for the page:
 globalThis.__DSH_OBJSTORE_ASSET_ORIGIN__ = 'https://asset.example.com'
 ```
 
-A stock install has no listing gateway, so the browser's page reports that the object-storage API is
-not reachable until one is deployed; the USD preview itself does not depend on it.
+A `truncated` listing whose `continuationToken` is not null offers **Load more** in the footer. A
+stock install with neither a configured library nor a gateway reports that the object-storage API is
+not reachable; the USD preview itself does not depend on it.
 
 ## Prim paths
 
@@ -413,7 +539,7 @@ prim a reference composed.
 Requires **Node ≥ 20** and npm.
 
 ```bash
-npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer
+npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer, web-ifc
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
 npm test               # objstore + update + instancer + register + drop + prim-tree + selection + details + parse + s3 + articulation + studio + articulation-render + render
@@ -533,13 +659,15 @@ terminal update plus a host restart, because the route is itself part of the new
 | `details` | the prim-details reader in isolation, no browser: declared types (`point3f[]`, `int[]`, `token`, never a JavaScript type), `custom` / `uniform` modifiers, `kind` and `apiSchemas`, relationships with resolved targets, **ASCII and crate agreeing on every attribute of the same stage**, a long array summarised by its true element count instead of materialised (and counted as elements, not components), a declared-but-unset attribute keeping its type, **a prim a `references` arc re-roots found under its composed path with its authored path reported**, a `subLayers` layer contributing at the same path, a UTF-8 BOM staying a text layer, the no-layer-bytes / no-such-prim answers staying distinct, and the panel's ordering and value-formatting rules |
 | `selection` | the selection highlight in isolation, no browser: one tint copy parented to the picked mesh and sharing its geometry (so a joint carries it and no vertex is duplicated), the copy refusing to be raycast, one placement of an instanced batch tinted rather than the batch, groups/points/lines refused instead of invented, the wireframe mode reaching a tint created after it, the source's face policy mirrored onto the tint both ways (`DoubleSide` kept, `FrontSide` taken back off the shared material), and `dispose()` releasing only its own material — never the caller's geometry |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
+| `ifc` | the IFC container and structure helpers, **no browser and no WASM**: the registry definition (a STEP file stays text-readable, only `.ifczip` is binary, no suffix claimed twice), container detection from the leading bytes (STEP prologue, BOM tolerated, zip signatures, and a `.ifc`-named non-STEP file correctly rejected), `FILE_SCHEMA` parsing, the IFCZIP root rule, unit labels (`MILLI`+`METRE` → `mm`, and no unit line for a metre model), path segments that survive a slash or a control character in a name, sibling disambiguation by express ID, and **the flat worker structure turned into a tree** — including the case the committed fixture caught: an `IfcProject` is an `IfcObjectDefinition` but not an `IfcProduct`, so a walk from products alone loses the whole site/building/storey chain |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
-| `s3` | host-side asset-library logic offline: environment-only configuration, `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, and the asset/health routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
-| `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
+| `s3` | host-side asset-library logic offline: environment-only configuration (including `DSH_USD_S3_ROOT_PREFIX` normalization and confinement — siblings and `..` refused, not clamped), `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, `ListObjectsV2` parsing (folders from `CommonPrefixes`, XML entities, continuation tokens), recursive search, a listing signature verified against an independent SigV4 derivation, and the asset/health/list/search routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
+| `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, backend selection (a configured host bypasses the gateway; an unconfigured one falls back to it), public URLs derived from the host endpoint, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
 | `update` | the local-checkout updater offline: ahead/behind parsing, dirty/detached/not-a-checkout refusals, check/update/restart actions, the single-update lock, restart command construction, a **real local-git integration** (bare origin + clone: fast-forward, package.json-aware install skip, rebuild, host-change detection, idempotent rerun), and the update route's GET/POST registration with malformed-body/unknown-action refusal |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, that a throwing frame observer stops the loop instead of hot-looping, and the selection highlight: one copy at the picked mesh's world position, its pixels visibly shifted towards the accent, and clearing it returning the frame to the unselected image |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame and selects the part, Home restores it, the tint travels with the part it marks, Escape and a background click deselect, colliders add their overlay, and idle draws nothing |
 | `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame, stay pickable, and the stats must name the OpenUSD (WASM) engine; a prim-panel case checks the path list, its filter and that a canvas click names the picked prim. Screenshots land in `tests/.artifacts/` |
+| `ifc-render` | **real Chromium + WebGL**: `IfcBody` mounts the committed IFC fixtures and the whole pipeline is production code — the worker boot, the gzip inflation, web-ifc, the graph. Each case must draw a non-flat frame (a thousand-plus distinct colours), report its schema and its measured extent, and list its spatial tree. Two assertions carry most of the weight: the **size** (`5.000 × 3.000 × 0.200` for a wall the file authors in millimetres, `8.000 × 6.600 × 6.000` for the two-storey building) proves the placement matrix was applied exactly once — a second Z-up→Y-up rotation lays the model on its side, which is how that bug was found; and the **details panel** proves a property set reaches the element through `IfcRelDefinesByProperties` with its declared `IFCBOOLEAN` type, and that a wall carrying a void is both foldable and selectable |
 
 The browser suites need Playwright + Chromium. Without a browser they print `SKIP`, and `npm test`
 fails instead of reporting a false green — set `DSH_ALLOW_BROWSER_SKIP=1` to run the offline suites
@@ -573,7 +701,46 @@ through external prim paths; `instancer/payload/root.usda` is the same shape wit
 the inner instancer and its prototype inside a payload layer (2 layers, 4 quads);
 `remote/root.usda` is an object-storage reference example.
 
+The IFC fixtures are hand-authored STEP files, so the suite needs no exporter and no CAD
+toolchain: `ifc/hello-wall.ifc` is one wall (5 × 3 × 0.2 m, authored in millimetres);
+`ifc/building.ifc` is a two-storey building with a real spatial tree
+(project → site → building → two storeys → 11 elements), six element types, six surface
+styles, three property sets and two boolean voids cut through two walls (12 placed
+geometries / 180 triangles, 8 × 6.6 × 6 m); `ifc/not-ifc.ifc` is plain prose behind an
+`.ifc` name, which is the negative case the preview's failure state exists for.
+
 ## Limitations
+
+### IFC
+
+- **An IFC model is read whole, in memory.** There is no streaming parse: the file's bytes and
+  its geometry both live in the worker until the tab closes. A very large model is therefore
+  bounded by the browser's heap, not by the Host's read caps — the same trade a dropped USD
+  asset makes, for the same reason.
+- **There is no IFC by drop yet.** A model opens from the Files tab by address, which is what
+  the document-preview registry offers. The sidebar drop zone still belongs to USD; an IFC file
+  dropped there reports that it carries no stage.
+- **The colour is a surface style, not a material.** IFC's `IfcSurfaceStyle` carries a colour
+  and (optionally) a transparency; it has no roughness, metalness or texture channels this
+  viewport reads, so every surface is drawn with one fixed roughness. A model whose appearance
+  comes from a texture map renders in its style colour instead.
+- **The element tree is the product structure, not the geometry.** A prim with no
+  `IfcProduct` subtype (a property template, a style) has no row; an element whose
+  representation the kernel could not build still gets a row and simply draws nothing. The tree
+  also folds an `IfcOpeningElement` under the element it voids, which is the third relation kind
+  the reader follows — an opening is a product no aggregate or containment reaches.
+- **Property sets are read per element, one relation scan at a time.** `IfcRelDefinesByProperties`
+  is walked for the element being described; a model with tens of thousands of relations makes
+  the first click on an element slower than the rest. Nothing is cached across elements.
+- **No `IfcSpatialStructureElement`-aware filtering and no quantities beyond the set.** The panel
+  lists property and quantity sets; it does not compute areas, volumes or takeoffs, and it does
+  not resolve a type's `IfcPropertySet` through `IfcRelDefinesByType` — only the sets defined
+  directly on the occurrence.
+- **The IFC reader ships inside the plugin bundle.** web-ifc is bundled and gzipped into
+  `lib/client.js` (≈1.0 MiB compressed), which is the price of a client plugin having no host
+  route to assume for a second script and a WASM binary. The finished bundle is ≈6.9 MiB.
+
+### USD
 
 - **MaterialX materials render grey.** The engine only understands `UsdPreviewSurface`,
   `OmniPBR`, and glTF MDL; a MaterialX-only asset hits the `material-fallback` warning.
@@ -654,9 +821,14 @@ the inner instancer and its prototype inside a payload layer (2 layers, 4 quads)
 This plugin reads **local bytes only** — workspace files through the host's Remote, and files
 the user drops on the sidebar through the browser's own file API — plus, when explicitly
 configured through `DSH_USD_S3_*` environment variables, **read-only objects from an
-S3-compatible object storage**. It mounts a preview for four file extensions and a drop entry
-for the same four, and nothing else: no uploads, no workspace writes, no credentials stored in
-the package, and no configuration files.
+S3-compatible object storage**. It mounts previews for six file extensions
+(`.usd`/`.usda`/`.usdc`/`.usdz` and `.ifc`/`.ifczip`) and a drop entry for the USD four, and
+nothing else: no uploads, no workspace writes, no credentials stored in the package, and no
+configuration files.
+
+Both engines run in the browser: the USD stage is composed by a WebAssembly OpenUSD, and the IFC
+model is parsed by a WebAssembly web-ifc. Neither sends the file anywhere, and the IFC reader
+needs no host route at all — a model is one self-contained STEP file.
 
 Its host routes are all owner-only exact Fetch routes on the authenticated `/api` channel: the
 read-only asset and health routes above, and the local-update route. The update route is the one
@@ -672,7 +844,8 @@ MIT — see [LICENSE](LICENSE).
 
 ## 中文简介
 
-在 DeepSeek Harness 的右侧文档面板里直接预览 `.usd` / `.usda` / `.usdc` / `.usdz`：
+在 DeepSeek Harness 的右侧文档面板里直接预览 `.usd` / `.usda` / `.usdc` / `.usdz` 以及
+`.ifc` / `.ifczip`：
 组合（sublayer / reference / payload / variant / PointInstancer…）由 WebAssembly 版 OpenUSD
 在 Web Worker 里完成，three.js 负责渲染；引擎不可用时自动回退到 three 的解析器并在面板上写明。
 被引用图层经工作区 Remote 读回后重新组合，最多 8 轮；带 `UsdPhysics` 关节的资产可交互
@@ -688,6 +861,17 @@ prim 会按图层里真实书写的路径回读，并同时标出组合后的路
 外部资产（桌面上的文件或文件夹）可以直接拖到右侧边栏打开：侧边栏「开始」页有「USD 三维预览」
 入口卡片，拖拽落在侧边栏面板上即会打开预览标签页，文件夹会连同被引用的图层和贴图一起读取；
 字节只在浏览器内处理，不上传、不写入工作区。
+**IFC 模型**是同一套视口的第二个格式：STEP 文件由 web-ifc（WebAssembly）在独立的 Worker 里解析，
+被 gzip 压缩后随客户端 bundle 一起下发（首次使用时用 `DecompressionStream` 解压，因此 bundle 只多约
+1.0 MiB 而不是 6.8 MiB）。每个构件的摆放矩阵在 Worker 里就乘好（web-ifc 的 `flatTransformation`
+本身已经包含 Z-up→Y-up 与长度单位换算），页面拿到的是世界坐标三角形，因此统计、拾取与取景三者一致。
+面板显示 schema（IFC2X3 / IFC4 / IFC4X3）、构件数、网格数、三角面数与实测尺寸，非米制时另外标出
+建模单位。「构件」面板按 `IfcRelAggregates` 与 `IfcRelContainedInSpatialStructure` 展示空间结构
+（project → site → building → storey → 构件），可折叠、可过滤、可点击选中；`IfcOpeningElement`
+会挂在它掏空的那个构件下面（`IfcRelVoidsElement` 是读取器跟踪的第三种关系）。点中构件后「详情」
+面板按属性集列出该构件的 `IfcPropertySet` / `IfcElementQuantity`，每条属性带它的 IFC 值类型
+（`IFCBOOLEAN` / `IFCREAL` / `IFCLABEL`…）。表面颜色取自 `IfcSurfaceStyle` 的 `IfcColourRgb`，
+按颜色共享材质；没有样式的模型用中性灰而不是纯黑。
 可选支持 `s3://` 对象存储引用：由宿主半边用 `DSH_USD_S3_*` 环境变量配置的凭据做只读 SigV4
 签名读取，浏览器侧把 ASCII 图层的 `s3://` 引用本地化到引擎包键后组合。构建：
 `npm install && npm run build && npm test`。本地 checkout 可用 `npm run update:local`（或 Web UI 的

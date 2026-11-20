@@ -184,8 +184,8 @@ await withFetch(async ({ url }) => {
   assert.equal(textOf(data), 'object-bytes', 'the byte route encodes each key segment')
   await assert.rejects(
     () => fetchObjectBytes('missing.usda'),
-    /objstore-http-404/,
-    'a missing object is a read failure',
+    /objstore-not-found/,
+    'a missing object is reported as not-found',
   )
 })
 say('objstore bytes       byte route and its error mapping')
@@ -324,5 +324,72 @@ say('objstore s3 fallback host unconfigured: gateway read, gateway missing, gate
   })
 }
 say('objstore http open   root bytes, relative reader, 404/network/malformed mapping')
+
+// ── host backend preference: signed routes first, gateway second ───────────
+
+{
+  const mod = await import('../src/client/objstore.js?backend=host')
+  const listBody = { bucket: 'asset', prefix: '', rootPrefix: 'Component/', allowedPrefixes: ['Component/'],
+    entries: [{ key: 'Component/a.usda', name: 'a.usda', type: 'file', size: 1 }], truncated: false }
+  await withFetch(async ({ url }) => {
+    if (url === '/api/usd-preview/health') return jsonResponse({ ok: true, library: { bucket: 'asset', endpoint: 'https://s3.example.com', rootPrefix: 'Component/' } })
+    if (url.startsWith('/api/usd-preview/list?')) return jsonResponse(listBody)
+    if (url.startsWith('/api/usd-preview/search?')) return jsonResponse({ entries: [], scanned: 1, truncated: false })
+    return errorResponse(404)
+  }, async (requests) => {
+    const listing = await mod.listPrefix('')
+    assert.equal(listing.rootPrefix, 'Component/', 'the host listing passes the configured root through')
+    assert.equal(requests.filter(r => r.url.startsWith('/usd-asset-api/')).length, 0,
+      'a configured host is used instead of the gateway')
+    await mod.searchFiles('Component/', 'a', true)
+    assert.equal(requests.filter(r => r.url.startsWith('/usd-asset-api/')).length, 0,
+      'search uses the signed host route too')
+  })
+}
+say('objstore backend      a configured host library bypasses the gateway')
+
+{
+  // No library configured: the gateway is the fallback, and a 403 there is a
+  // permission answer rather than an unreachable one.
+  const mod = await import('../src/client/objstore.js?backend=gateway')
+  await withFetch(async ({ url }) => {
+    if (url === '/api/usd-preview/health') return jsonResponse({ ok: true, library: null })
+    if (url.startsWith('/usd-asset-api/list?')) return jsonResponse({ entries: [], bucket: 'asset' })
+    return errorResponse(404)
+  }, async (requests) => {
+    await mod.listPrefix('samples/')
+    assert.equal(requests.filter(r => r.url.startsWith('/usd-asset-api/list')).length, 1,
+      'an unconfigured host falls back to the gateway listing')
+  })
+}
+{
+  const mod = await import('../src/client/objstore.js?backend=forbidden')
+  await withFetch(async () => errorResponse(403), async () => {
+    await assert.rejects(() => mod.listPrefix(''), /objstore-forbidden/, 'a 403 is reported as forbidden')
+  })
+}
+{
+  const mod = await import('../src/client/objstore.js?backend=none')
+  await withFetch(async () => errorResponse(404), async () => {
+    await assert.rejects(() => mod.listPrefix(''), /objstore-not-found/, 'a 404 is reported as not-found')
+  })
+}
+say('objstore fallback     gateway used when the host has no library; 403/404 mapped')
+
+// ── public URLs: a host-reported endpoint makes them absolute ──────────────
+
+{
+  const mod = await import('../src/client/objstore.js?urls=1')
+  assert.equal(mod.publicAssetUrl('a b/c.usda'),
+    '/usd-asset/a%20b/c%20d.usda'.replace('/c%20d', '/c'),
+    'without a library the URL is the page-relative gateway route')
+  assert.equal(mod.publicAssetUrl('a b/c d.usda', { endpoint: 'https://s3.example.com/', bucket: 'asset' }),
+    'https://s3.example.com/asset/a%20b/c%20d.usda',
+    'a host endpoint makes the URL absolute, without a double slash')
+  assert.equal(mod.publicAssetUrl('x.usda', { endpoint: 'https://s3.example.com' }),
+    'https://s3.example.com/asset/x.usda',
+    'a missing bucket falls back to the default')
+}
+say('objstore public url   absolute from the host endpoint, page-relative otherwise')
 
 process.stdout.write('objstore.test.mjs  OK  (paths, request cache, address descriptor)\n')

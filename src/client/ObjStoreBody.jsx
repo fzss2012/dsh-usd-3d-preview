@@ -1,16 +1,19 @@
 /**
  * Right-sidebar page body: browse the read-only object storage (asset bucket).
  *
- * The tab lists the gateway's exposed prefixes lazily, shows one directory at a
- * time with size/time, and can hand a USD stage straight to the existing USD
- * preview tab (same plugin, pending-drop handoff). Links and bytes go through
- * the same-origin / gateway routes, so no S3 credential reaches the page.
+ * The tab lists the asset library lazily -- through the host half's own signed
+ * routes when a library is configured (`DSH_USD_S3_*`), through a deployment
+ * gateway otherwise -- shows one directory at a time with size/time, and can
+ * hand a USD stage straight to the existing USD preview tab (same plugin,
+ * pending-drop handoff). Either way the page holds no S3 credential: the host
+ * signs, the browser only ever sees JSON and bytes.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   fetchObjectBytes,
   formatBytes,
   formatDate,
+  hostLibrary,
   isUsdKey,
   listPrefix,
   publicAssetUrl,
@@ -186,7 +189,11 @@ export function UsdObjectStoreBody(props) {
   const t = props.t
   const openDroppedStage = props.openDroppedStage
   const [prefix, setPrefix] = useState('')
-  const [payload, setPayload] = useState({ entries: [], allowedPrefixes: [], truncated: false, bucket: 'asset' })
+  const [payload, setPayload] = useState({
+    entries: [], allowedPrefixes: [], truncated: false, bucket: 'asset', rootPrefix: '', continuationToken: null,
+  })
+  /** The host's reported library (endpoint/bucket/rootPrefix), or undefined. */
+  const [library, setLibrary] = useState(undefined)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('')
@@ -209,21 +216,27 @@ export function UsdObjectStoreBody(props) {
     }
   }, [t])
 
-  const load = useCallback(async (nextPrefix) => {
+  const load = useCallback(async (nextPrefix, options = {}) => {
     controllerRef.current?.abort()
     const controller = new AbortController()
     controllerRef.current = controller
+    // "Load more" appends the next page; a navigation replaces the list.
+    const append = options.append === true
     setLoading(true)
     setError(null)
     try {
-      const data = await listPrefix(nextPrefix, controller.signal)
+      const data = await listPrefix(nextPrefix, controller.signal, options.token)
       if (controller.signal.aborted) return
-      setPayload({
-        entries: Array.isArray(data.entries) ? data.entries : [],
+      const entries = Array.isArray(data.entries) ? data.entries : []
+      const nextToken = typeof data.continuationToken === 'string' ? data.continuationToken : null
+      setPayload(current => ({
+        entries: append ? [...current.entries, ...entries] : entries,
         allowedPrefixes: Array.isArray(data.allowedPrefixes) ? data.allowedPrefixes : [],
         truncated: data.truncated === true,
         bucket: typeof data.bucket === 'string' ? data.bucket : 'asset',
-      })
+        rootPrefix: typeof data.rootPrefix === 'string' ? data.rootPrefix : '',
+        continuationToken: nextToken,
+      }))
       setPrefix(typeof data.prefix === 'string' ? data.prefix : nextPrefix)
     } catch (err) {
       if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err))
@@ -233,6 +246,10 @@ export function UsdObjectStoreBody(props) {
   }, [])
 
   useEffect(() => {
+    // The library tells the page which bucket and prefix the host signs for; it
+    // is optional (a gateway-only deployment answers undefined) and a failure
+    // must not block the listing itself.
+    void hostLibrary().then(value => setLibrary(value)).catch(() => setLibrary(undefined))
     void load('')
     return () => controllerRef.current?.abort()
   }, [load])
@@ -275,15 +292,20 @@ export function UsdObjectStoreBody(props) {
   }, [filter, prefix, usdOnly])
 
   const breadcrumbs = useMemo(() => {
-    const parts = prefix.split('/').filter(Boolean)
-    const crumbs = [{ name: payload.bucket, prefix: '' }]
-    let acc = ''
+    const root = payload.rootPrefix
+    // The listing never climbs above the configured root, so the first crumb is
+    // the root directory itself, not the bucket: a deep root would otherwise be
+    // unreachable from the page.
+    const relative = root !== '' && prefix.startsWith(root) ? prefix.slice(root.length) : prefix
+    const parts = relative.split('/').filter(Boolean)
+    const crumbs = [{ name: payload.bucket, prefix: root }]
+    let acc = root
     for (const part of parts) {
       acc += part + '/'
       crumbs.push({ name: part, prefix: acc })
     }
     return crumbs
-  }, [payload.bucket, prefix])
+  }, [payload.bucket, payload.rootPrefix, prefix])
 
   const visible = useMemo(() => {
     const needle = filter.trim().toLowerCase()
@@ -344,7 +366,12 @@ export function UsdObjectStoreBody(props) {
   }, [])
 
   const openUsd = useCallback(async (entry) => {
-    if (typeof openDroppedStage !== 'function') return
+    if (typeof openDroppedStage !== 'function') {
+      // The USD preview tab is not mounted in this composition; say so instead of
+      // leaving the button looking dead.
+      setError('preview-unavailable')
+      return
+    }
     setBusyKey(entry.key)
     setError(null)
     try {
@@ -352,7 +379,7 @@ export function UsdObjectStoreBody(props) {
       const rootBytes = await fetchObjectBytes(rootKey)
       openDroppedStage({
         remoteStage: {
-          uri: s3Uri(payload.bucket, rootKey),
+          uri: s3Uri(library?.bucket ?? payload.bucket, rootKey),
           kind: 's3',
           label: entry.name || rootKey,
           rootKey,
@@ -367,7 +394,7 @@ export function UsdObjectStoreBody(props) {
     } finally {
       setBusyKey(null)
     }
-  }, [openDroppedStage, objectAssetReader, objectReader, payload.bucket])
+  }, [library?.bucket, openDroppedStage, objectAssetReader, objectReader, payload.bucket])
 
   const copy = useCallback(async (text, mark) => {
     try {
@@ -396,7 +423,11 @@ export function UsdObjectStoreBody(props) {
         ? label('objstoreForbidden', 'This prefix is not exposed by the gateway')
         : error === 'clipboard-unavailable'
           ? label('objstoreClipboard', 'Clipboard is not available in this browser')
-          : label('objstoreError', 'Read failed') + ': ' + error)
+          : error === 'preview-unavailable'
+            ? label('objstoreNoPreview', 'The USD preview tab is not available in this composition')
+            : error === 'objstore-too-large'
+              ? label('objstoreTooLarge', 'That object is larger than the preview accepts')
+              : label('objstoreError', 'Read failed') + ': ' + error)
 
   // A search and an action can both have failed; neither may be hidden by the
   // other, so the list shows both lines while a query is active.
@@ -409,6 +440,7 @@ export function UsdObjectStoreBody(props) {
       <div style={HEADER}>
         <span style={TITLE} title={'s3://' + payload.bucket + '/' + prefix}>
           {label('objstoreTitle', 'Object storage')} · {payload.bucket}
+          {payload.rootPrefix === '' ? null : ' · ' + payload.rootPrefix.replace(/\/$/, '')}
         </span>
         <button type="button" style={smallButton(false)} onClick={() => navigate(prefix)}>
           {label('objstoreRefresh', 'Refresh')}
@@ -482,13 +514,13 @@ export function UsdObjectStoreBody(props) {
               onClick={() => {
                 if (entry.type === 'folder') navigate(entry.key + '/')
                 else if (isUsdKey(entry.key)) void openUsd(entry)
-                else window.open(publicAssetUrl(entry.key), '_blank', 'noopener')
+                else window.open(publicAssetUrl(entry.key, library), '_blank', 'noopener')
               }}
             >
               <span style={BADGE}>{badgeFor(entry)}</span>
               <span style={NAME}>{entry.name}</span>
               {searching
-                ? <span style={PATHHINT}>{entry.key.slice(0, Math.max(0, entry.key.length - entry.name.length - 1))}</span>
+                ? <span style={PATHHINT}>{dirOf(entry.key)}</span>
                 : null}
             </button>
             {entry.type === 'folder'
@@ -510,16 +542,16 @@ export function UsdObjectStoreBody(props) {
                 <button
                   type="button"
                   style={smallButton(false)}
-                  title={s3Uri(payload.bucket, entry.key)}
-                  onClick={() => void copy(s3Uri(payload.bucket, entry.key), 's3:' + entry.key)}
+                  title={s3Uri(library?.bucket ?? payload.bucket, entry.key)}
+                  onClick={() => void copy(s3Uri(library?.bucket ?? payload.bucket, entry.key), 's3:' + entry.key)}
                 >
                   {copied === 's3:' + entry.key ? '✓' : 's3'}
                 </button>
                 <button
                   type="button"
                   style={smallButton(false)}
-                  title={publicAssetUrl(entry.key)}
-                  onClick={() => void copy(publicAssetUrl(entry.key), 'http:' + entry.key)}
+                  title={publicAssetUrl(entry.key, library)}
+                  onClick={() => void copy(publicAssetUrl(entry.key, library), 'http:' + entry.key)}
                 >
                   {copied === 'http:' + entry.key ? '✓' : 'http'}
                 </button>
@@ -527,7 +559,7 @@ export function UsdObjectStoreBody(props) {
                   type="button"
                   style={smallButton(false)}
                   title={label('objstoreOpen', 'Open in browser')}
-                  onClick={() => window.open(publicAssetUrl(entry.key), '_blank', 'noopener')}
+                  onClick={() => window.open(publicAssetUrl(entry.key, library), '_blank', 'noopener')}
                 >
                   ↗
                 </button>
@@ -543,9 +575,22 @@ export function UsdObjectStoreBody(props) {
             + ' · ' + label('objstoreScanned', 'scanned') + ' ' + searchPayload.scanned
             + ' · ' + (usdOnly ? label('objstoreUsdOnly', 'Only USD files') : label('objstoreAllFiles', 'all files'))
             + (searchPayload.truncated ? ' · ' + label('objstoreTruncated', 'listing truncated; refine the query') : '')
-          : label('objstoreAllowed', 'Exposed prefixes') + ': ' + (payload.allowedPrefixes.join(', ') || '—')
+          : label('objstoreSource', 'Source') + ': '
+            + (library === undefined ? label('objstoreSourceGateway', 'deployment gateway') : label('objstoreSourceHost', 'host signed route'))
             + ' · ' + rows.length + ' / ' + payload.entries.length + ' ' + label('objstoreItems', 'items')
-            + (payload.truncated ? ' · ' + label('objstoreTruncated', 'listing truncated; refine the prefix') : '')}
+            + (payload.truncated && payload.continuationToken !== null
+              ? ' · ' + label('objstoreTruncated', 'listing truncated')
+              : '')}
+        {!searching && payload.truncated && payload.continuationToken !== null ? (
+          <button
+            type="button"
+            style={{ ...smallButton(false), marginLeft: 6 }}
+            disabled={loading}
+            onClick={() => void load(prefix, { append: true, token: payload.continuationToken })}
+          >
+            {label('objstoreMore', 'Load more')}
+          </button>
+        ) : null}
       </div>
     </div>
   )

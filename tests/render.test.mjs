@@ -120,7 +120,7 @@ const hostContext = {
   },
 }
 hostHalf.apply(hostContext, undefined)
-assert.equal(hostRoutes.size, 3, 'the host half registered the asset, health and update routes')
+assert.equal(hostRoutes.size, 5, 'the host half registered the asset, health, list, search and update routes')
 
 /** Files to draw, and the geometry each must report. */
 const CASES = [

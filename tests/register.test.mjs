@@ -166,9 +166,12 @@ assert.deepEqual(client.inject, [
   'sidebarRight',
 ])
 
-assert.equal(seen.definitions.length, 1, 'exactly one document preview definition is registered')
-const definition = seen.definitions[0]
-assert.equal(definition.id, 'dsh-usd-3d-preview/usd')
+// Two formats, two definitions: a USD stage is composed by an engine that resolves
+// composition arcs, an IFC model is a STEP file read by a schema-aware reader.
+// They share the viewport, not the reader.
+assert.equal(seen.definitions.length, 2, 'the USD and IFC definitions are registered once each')
+const definition = seen.definitions.find(entry => entry.id === 'dsh-usd-3d-preview/usd')
+assert.ok(definition !== undefined, 'the USD definition is registered')
 assert.deepEqual([...definition.extensions], ['usd', 'usda', 'usdc', 'usdz'])
 assert.deepEqual([...definition.binaryExtensions], ['usd', 'usdc', 'usdz'])
 for (const extension of definition.binaryExtensions) {
@@ -184,7 +187,27 @@ assert.equal(definition.title(), 'USD 三维预览')
 // for a crate; the definition must say so itself.
 assert.equal(typeof definition.title, 'function')
 
+const ifcDefinition = seen.definitions.find(entry => entry.id === 'dsh-usd-3d-preview/ifc')
+assert.ok(ifcDefinition !== undefined, 'the IFC definition is registered')
+assert.deepEqual([...ifcDefinition.extensions], ['ifc', 'ifczip'])
+// A STEP file is ASCII and must stay readable as text; only the zip package is binary.
+assert.deepEqual([...ifcDefinition.binaryExtensions], ['ifczip'])
+assert.notEqual(ifcDefinition.priority, 'builtin')
+assert.equal(ifcDefinition.loading, 'bytes-complete')
+assert.equal(ifcDefinition.wrap, false)
+assert.equal(typeof ifcDefinition.title, 'function')
+// The stub dictionary echoes an unknown key, so this is the key the definition
+// asked for: the IFC title is its own string, not the USD one.
+assert.equal(ifcDefinition.title(), 'ifcTitle', 'the IFC title is its own dictionary key')
+assert.notEqual(ifcDefinition.title(), definition.title(), 'the two previews must not share a title')
+// The two definitions must not collide on a suffix, or the ranking would decide
+// which reader a file gets.
+for (const extension of ifcDefinition.extensions) {
+  assert.equal(definition.extensions.includes(extension), false, `suffix "${extension}" is claimed twice`)
+}
+
 assert.deepEqual(seen.injects, [
+  'sidebar.right.tab.document',
   'sidebar.right.tab.document',
   'sidebar.right.pane.tab',
   'sidebar.right.pane.tab',
@@ -192,12 +215,23 @@ assert.deepEqual(seen.injects, [
   'plugins.detail.badge',
   'plugins.detail.section',
 ])
-assert.equal(seen.slots.length, 6, 'the document body, both page bodies and the three update surfaces are registered once each')
-const [body] = seen.slots
-assert.equal(body.options.name, 'sidebar.right.tab.document')
-assert.equal(body.options.key, definition.id, 'the body key must equal the definition id')
+assert.equal(seen.slots.length, 7, 'two document bodies, both page bodies and the three update surfaces are registered once each')
+const bodies = seen.slots.filter(slot => slot.options.name === 'sidebar.right.tab.document')
+assert.equal(bodies.length, 2, 'each format owns one keyed document body')
+const body = bodies.find(slot => slot.options.key === definition.id)
+assert.ok(body !== undefined, 'the USD document body is not registered')
 assert.equal(body.options.locale, 'usd3dPreview')
 assert.equal(typeof body.component, 'function', 'the body must be a component')
+
+// The IFC body is a plain keyed body: it reads no sibling layer, because a model
+// is one self-contained STEP file. It therefore injects nothing at all — and that
+// absence is the contract, not an oversight.
+const ifcBody = bodies.find(slot => slot.options.key === ifcDefinition.id)
+assert.ok(ifcBody !== undefined, 'the IFC document body is not registered')
+assert.equal(ifcBody.options.key, ifcDefinition.id, 'the body key must equal the definition id')
+assert.equal(ifcBody.options.locale, 'usd3dPreview')
+assert.equal(typeof ifcBody.component, 'function')
+assert.equal(ifcBody.options.inject, undefined, 'an IFC model needs no injected reader')
 
 // The layer reader is the one thing the body cannot supply itself: it must come
 // from the registration, must be async, and must go through the workspace Remote.
@@ -302,6 +336,8 @@ assert.ok(updateSection !== undefined, 'the update section is registered on the 
 assert.equal(updateSection.options.id, 'dsh-usd-3d-preview/update-section')
 assert.equal(typeof updateSection.component, 'function')
 
-assert.equal(seen.effects.length, 11, 'every registration is owned by a reversible effect')
+// Every registration is owned by a reversible effect; the IFC preview adds two
+// (its document-preview definition and its keyed document body).
+assert.equal(seen.effects.length, 13, 'every registration is owned by a reversible effect')
 
 process.stdout.write(`register.test.mjs  OK  (${seen.effects.length} effects, ${requested.length} module requests)\n`)

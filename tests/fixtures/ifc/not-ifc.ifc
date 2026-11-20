@@ -1,0 +1,8 @@
+This file has an .ifc name but is not an IFC model.
+
+It is a deliberate negative fixture for the IFC preview: the loader must reject it
+instead of rendering an empty scene, because it does not start with the STEP
+physical file prologue "ISO-10303-21;" and carries no FILE_SCHEMA header.
+
+Do not "fix" this file by giving it a STEP header: the negative test depends on
+the absence of one.

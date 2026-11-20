@@ -7,6 +7,8 @@
  *
  *   GET  /api/usd-preview/health        whether an asset library is configured
  *   GET  /api/usd-preview/asset?uri=…   one signed `s3://…` object read
+ *   GET  /api/usd-preview/list?prefix=  one signed directory listing
+ *   GET  /api/usd-preview/search?…      one signed recursive search
  *   GET  /api/usd-preview/update        local checkout update status (read-only)
  *   POST /api/usd-preview/update        { action: "check" | "update" | "restart" }
  *
@@ -21,11 +23,25 @@
  * second time, and no infrastructure is modified.
  */
 import { createUpdateService, UpdateError } from './update.js'
-import { AssetTooLargeError, READ_TIMEOUT_MS, defaultAssetCacheDir, readAsset, storageLibrary } from './s3.js'
+import {
+  AssetTooLargeError,
+  LIST_MAX_KEYS,
+  READ_TIMEOUT_MS,
+  defaultAssetCacheDir,
+  listPrefix,
+  normalizeRootPrefix,
+  objectUrl,
+  readAsset,
+  resolvePrefix,
+  searchFiles,
+  storageLibrary,
+} from './s3.js'
 
 /** Exact Fetch-route paths on the shared /api channel. */
 const ASSET_PATH = '/api/usd-preview/asset'
 const HEALTH_PATH = '/api/usd-preview/health'
+const LIST_PATH = '/api/usd-preview/list'
+const SEARCH_PATH = '/api/usd-preview/search'
 const UPDATE_PATH = '/api/usd-preview/update'
 
 /** Plugin name shown by the loader. */
@@ -128,11 +144,101 @@ export function apply(ctx) {
     const resolved = await library()
     return jsonResponse(200, {
       ok: true,
-      // Only the non-secret half is reported: the endpoint and where it came from.
+      // Only the non-secret half is reported: the endpoint, the bucket, the
+      // prefix the browser is confined to, and where the configuration came
+      // from. Never the credentials, never a local path.
       library: resolved === undefined
         ? null
-        : { endpoint: resolved.endpoint, bucket: resolved.bucket, source: resolved.source },
+        : {
+          endpoint: resolved.endpoint,
+          bucket: resolved.bucket,
+          rootPrefix: resolved.rootPrefix,
+          source: resolved.source,
+        },
     })
+  }
+
+  /**
+   * Answer one signed directory listing.
+   *
+   * The page's `prefix` is confined to `DSH_USD_S3_ROOT_PREFIX`, so the browser
+   * can never list outside the asset root even though the host holds credentials
+   * for the whole bucket.
+   * @param request - authenticated Fetch request on the shared /api channel.
+   * @returns the listing JSON, or a JSON error response.
+   */
+  const list = async (request) => {
+    const resolved = await library()
+    if (resolved === undefined) {
+      return jsonResponse(503, {
+        error: 'no asset library is configured: set DSH_USD_S3_ENDPOINT, '
+          + 'DSH_USD_S3_ACCESS_KEY and DSH_USD_S3_SECRET_KEY '
+          + '(optionally DSH_USD_S3_BUCKET, DSH_USD_S3_REGION and DSH_USD_S3_ROOT_PREFIX)',
+      })
+    }
+    const url = new URL(request.url)
+    const prefix = resolvePrefix(url.searchParams.get('prefix') ?? '', resolved.rootPrefix)
+    if (prefix === undefined) {
+      return jsonResponse(403, { error: 'prefix is outside the configured asset root' })
+    }
+    try {
+      const result = await listPrefix(resolved, prefix, {
+        maxKeys: url.searchParams.get('maxKeys') ?? undefined,
+        continuationToken: url.searchParams.get('token') ?? undefined,
+      })
+      return jsonResponse(200, {
+        bucket: resolved.bucket,
+        prefix,
+        allowedPrefixes: resolved.rootPrefix === '' ? [] : [resolved.rootPrefix],
+        rootPrefix: resolved.rootPrefix,
+        endpoint: resolved.endpoint,
+        entries: result.entries.map(entry => (entry.type === 'folder'
+          ? entry
+          : { ...entry, url: objectUrl(resolved, entry.key) })),
+        truncated: result.truncated,
+        continuationToken: result.continuationToken ?? null,
+      })
+    } catch (error) {
+      if (request.signal.aborted) return new Response(null, { status: 499 })
+      ctx.logger?.warn?.('[usd-3d-preview] list %s failed: %s', prefix, String(error?.message ?? error))
+      return jsonResponse(502, { error: 'listing failed' })
+    }
+  }
+
+  /**
+   * Answer one signed recursive search below the confined root.
+   * @param request - authenticated Fetch request on the shared /api channel.
+   * @returns the search JSON, or a JSON error response.
+   */
+  const search = async (request) => {
+    const resolved = await library()
+    if (resolved === undefined) {
+      return jsonResponse(503, { error: 'no asset library is configured' })
+    }
+    const url = new URL(request.url)
+    const prefix = resolvePrefix(url.searchParams.get('prefix') ?? '', resolved.rootPrefix)
+    if (prefix === undefined) {
+      return jsonResponse(403, { error: 'prefix is outside the configured asset root' })
+    }
+    try {
+      const result = await searchFiles(resolved, prefix, {
+        query: url.searchParams.get('q') ?? '',
+        usdOnly: url.searchParams.get('usd') !== '0',
+        limit: url.searchParams.get('limit') ?? undefined,
+      })
+      return jsonResponse(200, {
+        bucket: resolved.bucket,
+        prefix,
+        entries: result.entries.map(entry => ({ ...entry, url: objectUrl(resolved, entry.key) })),
+        scanned: result.scanned,
+        truncated: result.truncated,
+        limit: LIST_MAX_KEYS,
+      })
+    } catch (error) {
+      if (request.signal.aborted) return new Response(null, { status: 499 })
+      ctx.logger?.warn?.('[usd-3d-preview] search %s failed: %s', prefix, String(error?.message ?? error))
+      return jsonResponse(502, { error: 'search failed' })
+    }
   }
 
   /**
@@ -202,6 +308,24 @@ export function apply(ctx) {
         fetch: health,
       }),
       'usd-3d-preview: asset library health route',
+    )
+    scope.effect(
+      () => scope.connection.fetch.register({
+        path: LIST_PATH,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: list,
+      }),
+      'usd-3d-preview: signed listing route',
+    )
+    scope.effect(
+      () => scope.connection.fetch.register({
+        path: SEARCH_PATH,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: search,
+      }),
+      'usd-3d-preview: signed search route',
     )
     scope.effect(
       () => scope.connection.fetch.register({

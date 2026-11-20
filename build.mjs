@@ -21,6 +21,7 @@
 import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -89,6 +90,88 @@ if (!previous.includes(`digest: ${JSON.stringify(digest)}`)) {
   process.stdout.write(`engine-assets.generated.js  regenerated (${digest})\n`)
 } else {
   process.stdout.write(`engine-assets.generated.js  unchanged (${digest})\n`)
+}
+
+// ── IFC assets: the reader worker + web-ifc's WASM binary ───────────────────
+// The IFC preview is a second engine with the USD one's packaging problem, at a
+// larger scale: a client plugin ships as one module-table entry and has no host
+// route it can assume for a worker script and a 1.6 MiB WASM binary.
+//
+// Three artifacts are embedded, and only the two large ones are compressed:
+//
+//   boot    the small script `new Worker` takes, verbatim — it inflates the two
+//           payloads with DecompressionStream and hands control to the engine
+//   engine  the reader worker, bundled with web-ifc inlined, gzipped
+//   wasm    web-ifc's binary, gzipped
+//
+// Without the compression this block would add ~6.8 MiB of base64 to the bundle;
+// gzipped it adds ~1.0 MiB. web-ifc is bundled from its ESM entry rather than
+// taken from the package's pre-built `web-ifc-api-iife.js` so that
+// `src/client/ifc-worker.js` is a real module with real imports, and so that a
+// future web-ifc that moves its entry point fails this build loudly instead of
+// silently shipping a worker with no reader in it.
+const ifcDir = join(root, 'node_modules', 'web-ifc')
+const ifcGeneratedPath = join(root, 'src/client/ifc-assets.generated.js')
+const ifcWorkerBundle = await build({
+  entryPoints: [join(root, 'src/client/ifc-worker.js')],
+  bundle: true,
+  write: false,
+  format: 'iife',
+  platform: 'browser',
+  target: 'chrome120',
+  legalComments: 'none',
+  logLevel: 'warning',
+})
+const ifcWorkerText = ifcWorkerBundle.outputFiles[0].text
+// The bootstrap is small and is loaded verbatim by the worker; only the two
+// payloads are compressed, because only they are large.
+const ifcBootBundle = await build({
+  entryPoints: [join(root, 'src/client/ifc-worker-boot.js')],
+  bundle: true,
+  write: false,
+  format: 'iife',
+  platform: 'browser',
+  target: 'chrome120',
+  minify: true,
+  legalComments: 'none',
+  logLevel: 'warning',
+})
+const ifcBootText = ifcBootBundle.outputFiles[0].text
+const ifcWasmBytes = await readFile(join(ifcDir, 'web-ifc.wasm'))
+const ifcDigest = sha256().update(ifcWorkerText).update(ifcWasmBytes).digest('hex').slice(0, 16)
+const ifcGeneration = `/**
+ * IFC engine assets, embedded at build time by build.mjs — do not edit.
+ *
+ * boot:   the worker bootstrap from \`src/client/ifc-worker-boot.js\`, which
+ *         decompresses the two payloads below and starts the engine.
+ * engine: the reader worker from \`src/client/ifc-worker.js\`, bundled with
+ *         \`web-ifc\` inlined (so the page never fetches a second script).
+ * wasm:   \`web-ifc.wasm\` from web-ifc ${JSON.parse(
+  await readFile(join(ifcDir, 'package.json'), 'utf8')).version}.
+ *
+ * engine and wasm are gzip-compressed before being base64-encoded. The shell
+ * serves a client plugin as one uncompressed JavaScript file, and raw base64 of
+ * 3.5 MiB + 1.6 MiB would add 6.8 MiB to a bundle that is already 5.3 MiB;
+ * gzipped they are 0.4 MiB + 0.6 MiB. The worker inflates them with the
+ * platform's own DecompressionStream.
+ *
+ * digest: ${ifcDigest} (sha256 of worker text + wasm bytes, first 16 hex chars).
+ */
+export const IFC_ASSETS = {
+  wasmBytes: ${ifcWasmBytes.byteLength},
+  workerBytes: ${Buffer.byteLength(ifcWorkerText)},
+  digest: ${JSON.stringify(ifcDigest)},
+  boot: ${JSON.stringify(Buffer.from(ifcBootText, 'utf8').toString('base64'))},
+  engine: ${JSON.stringify(gzipSync(Buffer.from(ifcWorkerText, 'utf8')).toString('base64'))},
+  wasm: ${JSON.stringify(gzipSync(ifcWasmBytes).toString('base64'))},
+}
+`
+const previousIfc = await readFile(ifcGeneratedPath, 'utf8').catch(() => '')
+if (!previousIfc.includes(`digest: ${JSON.stringify(ifcDigest)}`)) {
+  await writeFile(ifcGeneratedPath, ifcGeneration, 'utf8')
+  process.stdout.write(`ifc-assets.generated.js  regenerated (${ifcDigest})\n`)
+} else {
+  process.stdout.write(`ifc-assets.generated.js  unchanged (${ifcDigest})\n`)
 }
 
 // ── host half ───────────────────────────────────────────────────────────────

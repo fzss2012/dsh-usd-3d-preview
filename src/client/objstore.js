@@ -1,11 +1,17 @@
 /**
  * Client-side helpers for the object-storage sidebar tab.
  *
- * The routes below are the page's mapping onto whatever terminates the asset
- * library (see the README): an nginx location, a gateway, or the host half
- * itself. They are read from the page's own origin by default, because that is
- * the only origin a deployment can be sure a browser may call. A deployment that
- * terminates the routes elsewhere names that origin once:
+ * Two backends answer the same shape, and the host half is preferred because it
+ * needs no extra deployment:
+ *
+ *   1. the host half's own signed routes (`/api/usd-preview/list|search`), which
+ *      list with the `DSH_USD_S3_*` credentials and never send one to the page;
+ *   2. a deployment-provided gateway (`/usd-asset-api/list|search`), for a
+ *      deployment that terminates the routes elsewhere.
+ *
+ * The gateway routes are read from the page's own origin by default, because
+ * that is the only origin a deployment can be sure a browser may call. A
+ * deployment that terminates them elsewhere names that origin once:
  *
  *   globalThis.__DSH_OBJSTORE_ASSET_ORIGIN__ = 'https://asset.example.com'
  *
@@ -20,6 +26,15 @@ const ASSET_ORIGIN = (() => {
   if (typeof override !== 'string') return ''
   return override.trim().replace(/\/+$/, '')
 })()
+
+/** Host route that lists with the configured credentials (preferred). */
+const HOST_LIST = '/api/usd-preview/list'
+
+/** Host route that searches with the configured credentials (preferred). */
+const HOST_SEARCH = '/api/usd-preview/search'
+
+/** Host route that reports whether an asset library is configured at all. */
+const HOST_HEALTH = '/api/usd-preview/health'
 
 /** Page path mapped to the gateway's directory listing. */
 const API_LIST = '/usd-asset-api/list'
@@ -111,55 +126,75 @@ export function isUsdKey(key) {
 }
 
 /**
- * Resolve the origin that serves the object-storage API.
+ * Whether the host half has an asset library configured.
  *
- * The configured origin when one was named, the page's own origin otherwise.
- * The probe is cached so the tab asks once per page.
- * @returns origin string ('' for same-origin), or undefined when nothing answers.
+ * Probed once per page: a `library: null` answer means the signed routes will
+ * only ever 503, so the page falls back to the deployment gateway instead of
+ * asking a route that cannot answer. The probe is deliberately *not* cached on
+ * failure -- a host configured later in the same page lifetime is picked up by
+ * the next request rather than requiring a reload.
+ * @returns true when the signed host routes can be used.
  */
-export function apiOrigin() {
+export function hostLibrary() {
   if (basePromise === undefined) {
-    basePromise = (async () => {
-      try {
-        const response = await fetch(ASSET_ORIGIN + API_LIST + '?prefix=')
-        if (response.ok) return ASSET_ORIGIN
-      } catch {
-        // fall through to undefined: the caller reports one honest error
-      }
-      return undefined
-    })()
+    basePromise = fetch(HOST_HEALTH)
+      .then(async (response) => {
+        if (!response.ok) return undefined
+        const body = await response.json().catch(() => undefined)
+        return body !== null && body !== undefined && body.library !== null && body.library !== undefined
+          ? body.library
+          : undefined
+      })
+      .catch(() => {
+        // A failed probe must not poison the page for its whole lifetime.
+        basePromise = undefined
+        return undefined
+      })
   }
   return basePromise
 }
 
-/** Request one JSON document from the gateway through the API origin. */
-async function getJson(path) {
-  const base = await apiOrigin()
-  if (base === undefined) throw new Error('objstore-unreachable')
-  const response = await fetch(base + path)
-  if (response.status === 403) throw new Error('objstore-forbidden')
+/** Request one JSON document from one absolute-or-same-origin path. */
+async function getJson(path, signal) {
+  const response = await fetch(path, signal === undefined ? undefined : { signal })
+  if (response.status === 401 || response.status === 403) throw new Error('objstore-forbidden')
   if (response.status === 404) throw new Error('objstore-not-found')
+  if (response.status === 503) throw new Error('objstore-unreachable')
   if (!response.ok) throw new Error('objstore-http-' + response.status)
   return await response.json()
 }
 
 /**
  * List the immediate children of one prefix.
- * @param prefix - directory prefix ('' for the allowed roots).
+ *
+ * The signed host route answers first; the deployment gateway is used when the
+ * host has no library configured or the route is absent (a stock install with no
+ * gateway answers neither, and the page reports one honest error).
+ * @param prefix - directory prefix ('' for the configured root).
  * @param signal - caller abort signal (does not cancel the shared request).
- * @returns { bucket, prefix, allowedPrefixes, entries, truncated }.
+ * @param continuationToken - page token from a previous truncated listing.
+ * @returns { bucket, prefix, rootPrefix, entries, truncated, continuationToken }.
  */
-export async function listPrefix(prefix, signal) {
+export async function listPrefix(prefix, signal, continuationToken) {
   const text = String(prefix ?? '')
+  const token = typeof continuationToken === 'string' ? continuationToken : ''
   return await withSignal(
-    cached(listCache, text, () => getJson(API_LIST + '?prefix=' + encodeURIComponent(text))),
+    cached(listCache, text + '\u0000' + token, async () => {
+      const library = await hostLibrary()
+      if (library !== undefined) {
+        const params = new URLSearchParams({ prefix: text })
+        if (token !== '') params.set('token', token)
+        return await getJson(HOST_LIST + '?' + params.toString())
+      }
+      return await getJson(ASSET_ORIGIN + API_LIST + '?prefix=' + encodeURIComponent(text))
+    }),
     signal,
   )
 }
 
 /**
  * Recursively search files below one prefix.
- * @param prefix - search root ('' searches all exposed roots).
+ * @param prefix - search root ('' searches the whole configured root).
  * @param query - case-insensitive substring; '' returns every file.
  * @param usdOnly - restrict matches to .usd/.usda/.usdc/.usdz.
  * @param signal - caller abort signal (does not cancel the shared request).
@@ -173,26 +208,84 @@ export async function searchFiles(prefix, query, usdOnly, signal, limit = 200) {
     usd: usdOnly === false ? '0' : '1',
     limit: String(limit),
   })
-  const path = API_SEARCH + '?' + params.toString()
-  return await withSignal(cached(searchCache, path, () => getJson(path)), signal)
+  const path = params.toString()
+  return await withSignal(cached(searchCache, path, async () => {
+    const library = await hostLibrary()
+    if (library !== undefined) return await getJson(HOST_SEARCH + '?' + path)
+    return await getJson(ASSET_ORIGIN + API_SEARCH + '?' + path)
+  }), signal)
 }
 
+/** Largest object the sidebar will buffer into the page (the host cap, mirrored). */
+export const MAX_PAGE_OBJECT_BYTES = 64 * 1024 * 1024
+
+/** Wall-clock budget for one object read from the page. */
+export const OBJECT_TIMEOUT_MS = 30_000
+
 /**
- * Read one object's bytes through the public read-only route.
+ * Read one object's bytes, bounded in size and time.
+ *
+ * The signed host route is tried first (it also memoizes and disk-caches); the
+ * deployment gateway's public byte route is the fallback for a bucket the host
+ * cannot sign, which is exactly the case where the browser's bucket differs from
+ * the host's configured one.
  * @param key - object key.
  * @param signal - caller abort signal.
  * @returns object bytes.
  */
 export async function fetchObjectBytes(key, signal) {
-  const base = await apiOrigin()
-  if (base === undefined) throw new Error('objstore-unreachable')
-  const response = await fetch(base + ASSET_PREFIX + encodeKey(key), { signal })
+  const library = await hostLibrary()
+  if (library !== undefined) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('object read timed out')), OBJECT_TIMEOUT_MS)
+    const forward = () => controller.abort(signal?.reason)
+    if (signal !== undefined) {
+      if (signal.aborted) forward()
+      else signal.addEventListener('abort', forward, { once: true })
+    }
+    try {
+      const uri = s3Uri(library.bucket, key)
+      const response = await fetch('/api/usd-preview/asset?uri=' + encodeURIComponent(uri), {
+        signal: controller.signal,
+      })
+      if (response.ok) {
+        const declared = Number(response.headers.get('content-length'))
+        if (Number.isFinite(declared) && declared > MAX_PAGE_OBJECT_BYTES) throw new Error('objstore-too-large')
+        const buffer = new Uint8Array(await response.arrayBuffer())
+        if (buffer.byteLength > MAX_PAGE_OBJECT_BYTES) throw new Error('objstore-too-large')
+        return buffer
+      }
+      if (response.status === 404) throw new Error('objstore-not-found')
+    } catch (error) {
+      if (error?.name === 'AbortError' || signal?.aborted === true) throw error
+      if (error?.message === 'objstore-too-large' || error?.message === 'objstore-not-found') throw error
+      // Any other host failure falls through to the gateway.
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', forward)
+    }
+  }
+  const response = await fetch(ASSET_ORIGIN + ASSET_PREFIX + encodeKey(key), { signal })
+  if (response.status === 404) throw new Error('objstore-not-found')
   if (!response.ok) throw new Error('objstore-http-' + response.status)
   return new Uint8Array(await response.arrayBuffer())
 }
 
-/** Absolute or same-origin URL for one object's bytes. */
-export function publicAssetUrl(key) {
+/**
+ * URL for one object's bytes as the browser may open it.
+ *
+ * A signed read cannot be a plain link (it needs the session credential and a
+ * signature), so a link uses the endpoint the host reported, which is the URL a
+ * public-read asset library serves anyway.
+ * @param key - object key.
+ * @param library - the host's reported library, when it has one.
+ * @returns an absolute URL, or the gateway's page-relative route.
+ */
+export function publicAssetUrl(key, library) {
+  if (library !== undefined && typeof library.endpoint === 'string' && library.endpoint !== '') {
+    const bucket = typeof library.bucket === 'string' && library.bucket !== '' ? library.bucket : 'asset'
+    return library.endpoint.replace(/\/+$/, '') + '/' + encodeKey(bucket) + '/' + encodeKey(key)
+  }
   return ASSET_ORIGIN + ASSET_PREFIX + encodeKey(key)
 }
 

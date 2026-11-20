@@ -4,6 +4,7 @@ node_modules/
 # build products (npm run build)
 lib/
 src/client/engine-assets.generated.js
+src/client/ifc-assets.generated.js
 
 # test output
 tests/.artifacts/

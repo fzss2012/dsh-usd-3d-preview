@@ -6,3 +6,7 @@
 *.usdc binary
 *.usdz binary
 *.png binary
+
+# An IFCZIP is a zip package; an .ifc is a STEP text file and stays text so a
+# diff of a hand-authored fixture is readable.
+*.ifczip binary

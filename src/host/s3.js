@@ -12,6 +12,8 @@
  *   DSH_USD_S3_REGION      signing region (default `us-east-1`)
  *   DSH_USD_S3_ACCESS_KEY  access key id (required)
  *   DSH_USD_S3_SECRET_KEY  secret access key (required)
+ *   DSH_USD_S3_ROOT_PREFIX key prefix the sidebar browser is confined to
+ *                          (default: the whole bucket)
  *
  * Everything here is a read: no upload, no policy change, no new account, and
  * the credentials are only ever held in memory for the lifetime of one signing.
@@ -107,6 +109,9 @@ export async function storageLibrary() {
     region: process.env.DSH_USD_S3_REGION?.trim() || 'us-east-1',
     accessKey,
     secretKey,
+    // The sidebar browser never lists outside this prefix; the whole bucket when
+    // it is unset. Normalized once here so every route sees the same spelling.
+    rootPrefix: normalizeRootPrefix(process.env.DSH_USD_S3_ROOT_PREFIX),
     source: 'environment',
   }
 }
@@ -168,6 +173,260 @@ function signGet({ endpoint, region, accessKey, secretKey, bucket, key }) {
     },
   }
 }
+
+/** Largest object the sidebar browser accepts, so a rogue endpoint cannot park a list. */
+export const LIST_MAX_KEYS = 1000
+
+/** Wall-clock budget for one signed listing or head request. */
+export const LIST_TIMEOUT_MS = 15_000
+
+/**
+ * Normalize one configured key prefix.
+ *
+ * Accepts what a person types into an environment variable -- a leading slash, a
+ * full `s3://bucket/prefix` URI, backslashes, a trailing slash -- and returns the
+ * key form the API uses: no leading slash, exactly one trailing slash, "" for the
+ * bucket root.
+ * @param value - the configured prefix, or anything that is not a string.
+ * @returns the normalized prefix ("" for the whole bucket).
+ */
+export function normalizeRootPrefix(value) {
+  if (typeof value !== 'string') return ''
+  let text = value.trim()
+  // A full URI is accepted so the same string can be pasted from a browser.
+  const uri = /^s3:\/\/[^/]+\/?(.*)$/i.exec(text)
+  if (uri !== null) text = uri[1]
+  const segments = text.replaceAll('\\', '/').split('/').filter(segment => segment !== '' && segment !== '.')
+  if (segments.length === 0 || segments.includes('..')) return ''
+  return segments.join('/') + '/'
+}
+
+/**
+ * Normalize one prefix the page asked for, confined to the configured root.
+ * @param value - the page's `prefix` query parameter.
+ * @param rootPrefix - the configured root from {@link storageLibrary}.
+ * @returns the key prefix, or undefined when it is outside the root.
+ */
+export function resolvePrefix(value, rootPrefix) {
+  const root = normalizeRootPrefix(rootPrefix)
+  const text = typeof value === 'string' ? value.trim() : ''
+  const segments = text.replaceAll('\\', '/').split('/').filter(segment => segment !== '' && segment !== '.')
+  // A ".." segment would climb out of the root; refuse it rather than clamping,
+  // so a caller learns the prefix was rejected instead of listing somewhere else.
+  if (segments.includes('..')) return undefined
+  const key = segments.join('/')
+  const prefix = key === '' ? root : key + '/'
+  if (prefix.startsWith(root)) return prefix
+  // The page may name the root without its trailing slash ("Component" for the
+  // configured "Component/"); that is the same directory, not an escape.
+  if (prefix + '/' === root) return root
+  return undefined
+}
+
+/**
+ * Sign one read-only GET against the configured endpoint.
+ *
+ * Listing and head requests are GETs with query parameters, so they use the same
+ * SigV4 shape as {@link signGet} with a canonical query string added.
+ * @param options - endpoint, region, credentials, bucket, and the encoded query.
+ * @returns the absolute URL and the headers that authorize it.
+ */
+function signGetQuery({ endpoint, region, accessKey, secretKey, bucket, query }) {
+  const url = new URL(`${endpoint}/${encodeSegment(bucket)}/${query}`)
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '')
+  const dateStamp = amzDate.slice(0, 8)
+  const scope = `${dateStamp}/${region}/s3/aws4_request`
+  const canonicalQuery = [...url.searchParams.entries()]
+    .map(([name, value]) => [encodeSegment(name), encodeSegment(value)])
+    .sort((left, right) => (left[0] === right[0]
+      ? (left[1] < right[1] ? -1 : left[1] > right[1] ? 1 : 0)
+      : (left[0] < right[0] ? -1 : 1)))
+    .map(([name, value]) => `${name}=${value}`)
+    .join('&')
+  const canonicalRequest = [
+    'GET',
+    url.pathname,
+    canonicalQuery,
+    `host:${url.host}`,
+    `x-amz-content-sha256:${EMPTY_SHA256}`,
+    `x-amz-date:${amzDate}`,
+    '',
+    'host;x-amz-content-sha256;x-amz-date',
+    EMPTY_SHA256,
+  ].join('\n')
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256(canonicalRequest)].join('\n')
+  const kDate = hmac(`AWS4${secretKey}`, dateStamp)
+  const kRegion = hmac(kDate, region)
+  const kService = hmac(kRegion, 's3')
+  const signature = createHmac('sha256', hmac(kService, 'aws4_request')).update(stringToSign, 'utf8').digest('hex')
+  return {
+    url: url.toString(),
+    headers: {
+      'x-amz-content-sha256': EMPTY_SHA256,
+      'x-amz-date': amzDate,
+      authorization: `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=${signature}`,
+    },
+  }
+}
+
+/** Read one XML attribute or element body from a small S3 response. */
+function tagOf(xml, name) {
+  const match = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(xml)
+  return match === null ? undefined : match[1]
+}
+
+/** Decode the five XML entities an S3 response can carry in a key. */
+function unescapeXml(text) {
+  return text
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&apos;', "'")
+    .replaceAll('&amp;', '&')
+}
+
+/**
+ * One signed request that answers with text, bounded in time.
+ * @param library - the resolved library.
+ * @param query - the encoded query string (without a leading '?').
+ * @returns the response body, or undefined for a 403/404 (nothing to list).
+ */
+async function signedText(library, query) {
+  const { url, headers } = signGetQuery({ ...library, query })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('object storage request timed out')), LIST_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, { headers, signal: controller.signal })
+    if (response.status === 403 || response.status === 404) return undefined
+    if (!response.ok) throw new Error(`object storage request failed (HTTP ${response.status})`)
+    return await response.text()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * List the immediate children of one prefix (ListObjectsV2, delimiter '/').
+ *
+ * Folders are synthesized from `CommonPrefixes`; an object whose key is exactly
+ * the prefix is not an entry. The answer is bounded by {@link LIST_MAX_KEYS}.
+ * @param library - the resolved library.
+ * @param prefix - the key prefix to list (already confined by the caller).
+ * @param options - continuation token and page size.
+ * @returns the entries, whether more remain, and the token to continue from.
+ */
+export async function listPrefix(library, prefix, options = {}) {
+  const maxKeys = Math.min(Number(options.maxKeys) > 0 ? Math.trunc(Number(options.maxKeys)) : 500, LIST_MAX_KEYS)
+  const params = new URLSearchParams({ 'list-type': '2', delimiter: '/', prefix, 'max-keys': String(maxKeys) })
+  const token = typeof options.continuationToken === 'string' ? options.continuationToken.trim() : ''
+  if (token !== '') params.set('continuation-token', token)
+  const xml = await signedText(library, '?' + params.toString())
+  if (xml === undefined) throw new Error('object storage refused the listing')
+
+  const entries = []
+  const contents = /<Contents>([\s\S]*?)<\/Contents>/g
+  for (let match = contents.exec(xml); match !== null; match = contents.exec(xml)) {
+    const key = tagOf(match[1], 'Key')
+    if (key === undefined) continue
+    const name = unescapeXml(key)
+    if (name === prefix || name.endsWith('/')) continue
+    const size = Number(tagOf(match[1], 'Size'))
+    entries.push({
+      key: name,
+      name: name.slice(prefix.length),
+      type: 'file',
+      size: Number.isFinite(size) ? size : 0,
+      lastModified: tagOf(match[1], 'LastModified') ?? '',
+    })
+  }
+  const prefixes = /<CommonPrefixes>([\s\S]*?)<\/CommonPrefixes>/g
+  for (let match = prefixes.exec(xml); match !== null; match = prefixes.exec(xml)) {
+    const raw = tagOf(match[1], 'Prefix')
+    if (raw === undefined) continue
+    const key = unescapeXml(raw)
+    if (key === prefix || !key.endsWith('/')) continue
+    entries.push({
+      key,
+      name: key.slice(prefix.length, -1),
+      type: 'folder',
+      size: 0,
+      lastModified: '',
+    })
+  }
+  // Folders first, then files, each by name -- the order the sidebar renders.
+  entries.sort((left, right) => {
+    if (left.type !== right.type) return left.type === 'folder' ? -1 : 1
+    return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' })
+  })
+  const truncated = tagOf(xml, 'IsTruncated') === 'true'
+  const next = tagOf(xml, 'NextContinuationToken')
+  return {
+    entries,
+    truncated,
+    continuationToken: truncated && next !== undefined ? unescapeXml(next) : undefined,
+  }
+}
+
+/**
+ * Recursive search below one prefix, in one listing walk.
+ *
+ * S3 has no server-side substring search, so this walks the prefix with the
+ * signed listing API and filters client-side. The walk is bounded by a page cap
+ * so an enormous prefix cannot run forever; `truncated` says it hit the cap.
+ * @param library - the resolved library.
+ * @param prefix - the search root (already confined by the caller).
+ * @param options - query text, USD-only flag, match limit, and scan cap.
+ * @returns the matching entries, how many objects were scanned, and truncation.
+ */
+export async function searchFiles(library, prefix, options = {}) {
+  const query = String(options.query ?? '').trim().toLowerCase()
+  const usdOnly = options.usdOnly !== false
+  const limit = Math.min(Number(options.limit) > 0 ? Math.trunc(Number(options.limit)) : 200, LIST_MAX_KEYS)
+  const maxPages = Math.min(Number(options.maxPages) > 0 ? Math.trunc(Number(options.maxPages)) : 20, 200)
+  const entries = []
+  let scanned = 0
+  let truncated = false
+  let token = ''
+  for (let page = 0; page < maxPages; page += 1) {
+    const params = new URLSearchParams({ 'list-type': '2', prefix, 'max-keys': '1000' })
+    if (token !== '') params.set('continuation-token', token)
+    const xml = await signedText(library, '?' + params.toString())
+    if (xml === undefined) throw new Error('object storage refused the listing')
+    const contents = /<Contents>([\s\S]*?)<\/Contents>/g
+    for (let match = contents.exec(xml); match !== null; match = contents.exec(xml)) {
+      const raw = tagOf(match[1], 'Key')
+      if (raw === undefined) continue
+      const key = unescapeXml(raw)
+      if (key.endsWith('/')) continue
+      scanned += 1
+      if (usdOnly && !USD_KEY.test(key)) continue
+      if (query !== '' && !key.toLowerCase().includes(query)) continue
+      if (entries.length >= limit) {
+        truncated = true
+        break
+      }
+      const size = Number(tagOf(match[1], 'Size'))
+      entries.push({
+        key,
+        name: key.slice(key.lastIndexOf('/') + 1),
+        type: 'file',
+        size: Number.isFinite(size) ? size : 0,
+        lastModified: tagOf(match[1], 'LastModified') ?? '',
+      })
+    }
+    if (truncated) break
+    const more = tagOf(xml, 'IsTruncated') === 'true'
+    const next = tagOf(xml, 'NextContinuationToken')
+    if (!more || next === undefined) break
+    token = unescapeXml(next)
+    if (page === maxPages - 1) truncated = true
+  }
+  entries.sort((left, right) => left.key.localeCompare(right.key, undefined, { numeric: true, sensitivity: 'base' }))
+  return { entries, scanned, truncated }
+}
+
+/** The suffixes the preview can open; a search keeps only these by default. */
+const USD_KEY = /\.(usd|usda|usdc|usdz)$/i
 
 /**
  * Whether one `s3://` URI names an object this deployment can read.
@@ -266,6 +525,20 @@ export async function readAsset(library, uri, cacheDir, options = {}) {
     clearTimeout(timer)
     caller?.removeEventListener('abort', onCallerAbort)
   }
+}
+
+/**
+ * The anonymous read URL of one object.
+ *
+ * The sidebar hands this to the browser so a texture or a non-USD file can be
+ * opened directly; it carries no credential, so it only works for a bucket that
+ * allows anonymous object GET (a public-read asset library).
+ * @param library - the resolved library.
+ * @param key - the object key.
+ * @returns the absolute URL.
+ */
+export function objectUrl(library, key) {
+  return `${library.endpoint}/${encodeSegment(library.bucket)}/${key.split('/').map(encodeSegment).join('/')}`
 }
 
 /**

@@ -29,6 +29,8 @@
  */
 import { UsdPreviewGlyph } from './artwork.jsx'
 import { UsdDropBody } from './DropBody.jsx'
+import { IfcBody } from './IfcBody.jsx'
+import { ifcDefinition } from './ifc.js'
 import { watchSidebarDrops } from './sidebar-drop.js'
 import { UsdBody } from './UsdBody.jsx'
 import { UsdObjectStoreBody } from './ObjStoreBody.jsx'
@@ -36,6 +38,7 @@ import { en, zh } from './locales.js'
 import { offerDropped } from './dropped.js'
 import { UsdUpdateBadge, UsdUpdateSection, UsdUpdateSettingsTab } from './UpdatePanel.jsx'
 import { UPDATE_DETAIL_BADGE_ID, UPDATE_DETAIL_SECTION_ID, UPDATE_SETTINGS_TAB_ID } from './update.js'
+import { IFC_PREVIEW_ID } from './ifc.js'
 import {
   parseFileReference,
   siblingPath,
@@ -164,6 +167,22 @@ export function apply(ctx) {
       },
     }),
   }, UsdBody)), 'usd-3d-preview: document body')
+
+  // ── IFC: a document preview by address ────────────────────────────────────
+  // A model is one self-contained STEP file, so it needs only the door the Files
+  // tab already provides: an address and complete bytes. There is no sibling to
+  // read back and no injected reader, which is why this registration injects
+  // nothing and the sidebar drop zone still belongs to USD. Both formats end in
+  // their own body but share the same viewport, studio rig and selection tint.
+  ctx.effect(
+    () => ctx.documentPreviews.register(ifcDefinition(() => t('ifcTitle'))),
+    'usd-3d-preview: IFC registry definition',
+  )
+  ctx.effect(() => ctx.slots.inject('sidebar.right.tab.document', () => ctx.slots.register({
+    name: 'sidebar.right.tab.document',
+    key: IFC_PREVIEW_ID,
+    locale: NS,
+  }, IfcBody)), 'usd-3d-preview: IFC document body')
 
   // ── external assets: a page tab opened by dropping a stage ─────────────────
   ctx.effect(() => ctx.sidebarRightTabs.register({
