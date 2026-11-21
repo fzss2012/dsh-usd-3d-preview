@@ -265,6 +265,38 @@ export function UsdObjectStoreBody(props) {
     setForm(current => ({ ...current, [name]: value }))
   }, [])
 
+  const load = useCallback(async (nextPrefix, options = {}) => {
+    controllerRef.current?.abort()
+    const controller = new AbortController()
+    controllerRef.current = controller
+    // "Load more" appends the next page; a navigation replaces the list.
+    const append = options.append === true
+    setLoading(true)
+    setError(null)
+    try {
+      const data = await listPrefix(nextPrefix, controller.signal, options.token)
+      if (controller.signal.aborted) return
+      const entries = Array.isArray(data.entries) ? data.entries : []
+      const nextToken = typeof data.continuationToken === 'string' ? data.continuationToken : null
+      setPayload(current => ({
+        entries: append ? [...current.entries, ...entries] : entries,
+        allowedPrefixes: Array.isArray(data.allowedPrefixes) ? data.allowedPrefixes : [],
+        truncated: data.truncated === true,
+        bucket: typeof data.bucket === 'string' ? data.bucket : 'asset',
+        rootPrefix: typeof data.rootPrefix === 'string' ? data.rootPrefix : '',
+        continuationToken: nextToken,
+      }))
+      setPrefix(typeof data.prefix === 'string' ? data.prefix : nextPrefix)
+    } catch (err) {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      if (!controller.signal.aborted) setLoading(false)
+    }
+  }, [])
+
+  // Defined after `load` on purpose: `connect` calls it, and a useCallback's
+  // dependency array is evaluated during render, so referencing `load` before its
+  // declaration is a temporal-dead-zone ReferenceError, not a stale closure.
   const connect = useCallback(async () => {
     if (connectBusy) return
     setConnectBusy(true)
@@ -297,35 +329,6 @@ export function UsdObjectStoreBody(props) {
     setShowConnect(true)
     setPayload({ entries: [], allowedPrefixes: [], truncated: false, bucket: 'asset', rootPrefix: '', continuationToken: null })
     setPrefix('')
-  }, [])
-
-  const load = useCallback(async (nextPrefix, options = {}) => {
-    controllerRef.current?.abort()
-    const controller = new AbortController()
-    controllerRef.current = controller
-    // "Load more" appends the next page; a navigation replaces the list.
-    const append = options.append === true
-    setLoading(true)
-    setError(null)
-    try {
-      const data = await listPrefix(nextPrefix, controller.signal, options.token)
-      if (controller.signal.aborted) return
-      const entries = Array.isArray(data.entries) ? data.entries : []
-      const nextToken = typeof data.continuationToken === 'string' ? data.continuationToken : null
-      setPayload(current => ({
-        entries: append ? [...current.entries, ...entries] : entries,
-        allowedPrefixes: Array.isArray(data.allowedPrefixes) ? data.allowedPrefixes : [],
-        truncated: data.truncated === true,
-        bucket: typeof data.bucket === 'string' ? data.bucket : 'asset',
-        rootPrefix: typeof data.rootPrefix === 'string' ? data.rootPrefix : '',
-        continuationToken: nextToken,
-      }))
-      setPrefix(typeof data.prefix === 'string' ? data.prefix : nextPrefix)
-    } catch (err) {
-      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      if (!controller.signal.aborted) setLoading(false)
-    }
   }, [])
 
   useEffect(() => {
