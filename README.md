@@ -95,7 +95,7 @@ Measured by `npm test` (fixtures are committed; the render suites draw them in C
 | Studio rendering | ✅ Khronos PBR Neutral tone mapping, PMREM environment, 4 rect lights, 2048² shadows, lit ground disc, on-demand draw | ✅ same view |
 | Selection highlight | ✅ the picked object is re-tinted in the accent under an instanced/parented copy; Esc, the panel's × or a background click clears it | ✅ same pick path — a stage the fallback composed is still clickable, but only names a prim when the engine kept the paths |
 | `s3://` asset-layer references | ✅ ASCII layers localized + prefetched through the host route (object storage must be configured) | ❌ |
-| Object-storage browser | ✅ the sidebar lists the configured bucket through the host's signed routes (`DSH_USD_S3_ROOT_PREFIX` confines it), searches recursively, and hands a stage to the preview | ❌ |
+| Object-storage browser | ✅ the sidebar connects straight to MinIO/S3 with in-page SIGV4 or through the host's signed routes (`DSH_USD_S3_ROOT_PREFIX` confines it), searches recursively, and hands a stage to the preview | ❌ |
 
 The stats line at the bottom of the panel reports **engine / layer count / warning count**, and
 the warnings are listed by engine code (`layer-missing`, `composition`, `material-fallback`,
@@ -407,16 +407,27 @@ the root.
 ([`src/client/ObjStoreBody.jsx`](src/client/ObjStoreBody.jsx)), whose guide card sits **before** the
 USD preview card: browsing is the source, previewing is where one object ends up.
 
-It has two backends, and picks one per page:
+It has three backends, and picks one per page:
 
-1. **The host half (no extra deployment).** When `DSH_USD_S3_*` is configured,
+1. **Browser-direct (no deployment, no restart, no environment variables).** The tab's **Connect**
+   panel takes an endpoint, bucket, region, root prefix and a key pair, and signs each read-only
+   GET with SIGV4 in the page via Web Crypto
+   ([directS3.js](src/client/directS3.js)). This works even when the bucket denies anonymous
+   `ListBucket` — a common MinIO/S3 setup that allows object `GET` but not listing — because
+   each listing is signed. The credentials live only in the module closure for the lifetime of
+   the tab: never uploaded, never written to disk or localStorage, never logged. The endpoint
+   must answer CORS for the page, including the `authorization`, `x-amz-date` and
+   `x-amz-content-sha256` headers on an OPTIONS preflight; MinIO does by default. `Disconnect`
+   forgets the connection. A direct connection takes priority over the other two backends.
+2. **The host half (no extra deployment).** When `DSH_USD_S3_*` is configured,
    `GET /api/usd-preview/list` and `GET /api/usd-preview/search` list with the host's own SigV4
    credentials — the same trust-fenced `/api` channel the signed asset read uses. The browser
    never holds a credential, and the listing works against a bucket that denies anonymous
    `ListBucket`, which is the common MinIO/S3 configuration: anonymous `GET` of an object may be
    allowed while listing is not.
-2. **A deployment gateway.** When the host has no library, the page falls back to the
-   `/usd-asset-api/*` routes below, for a deployment that terminates them elsewhere.
+3. **A deployment gateway.** When neither a direct connection nor a host library exists, the
+   page falls back to the `/usd-asset-api/*` routes below, for a deployment that terminates them
+   elsewhere.
 
 Either backend offers:
 
@@ -667,6 +678,7 @@ terminal update plus a host restart, because the route is itself part of the new
 | `ifc` | the IFC container and structure helpers, **no browser and no WASM**: the registry definition (a STEP file stays text-readable, only `.ifczip` is binary, no suffix claimed twice), container detection from the leading bytes (STEP prologue, BOM tolerated, zip signatures, and a `.ifc`-named non-STEP file correctly rejected), `FILE_SCHEMA` parsing, the IFCZIP root rule, unit labels (`MILLI`+`METRE` → `mm`, and no unit line for a metre model), path segments that survive a slash or a control character in a name, sibling disambiguation by express ID, and **the flat worker structure turned into a tree** — including the case the committed fixture caught: an `IfcProject` is an `IfcObjectDefinition` but not an `IfcProduct`, so a walk from products alone loses the whole site/building/storey chain |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
 | `s3` | host-side asset-library logic offline: environment-only configuration (including `DSH_USD_S3_ROOT_PREFIX` normalization and confinement — siblings and `..` refused, not clamped), `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, `ListObjectsV2` parsing (folders from `CommonPrefixes`, XML entities, continuation tokens), recursive search, a listing signature verified against an independent SigV4 derivation, and the asset/health/list/search routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
+| `directS3` | the browser-direct S3 backend offline: endpoint/prefix normalization and root confinement (siblings and `..` refused), validation and the non-secret config (a secret never serializes), `s3://`/http URLs, `ListObjectsV2` parsing (folders from `CommonPrefixes`, XML entities, continuation tokens), recursive search, object bytes, and a Web Crypto SIGV4 signature verified against an independent derivation |
 | `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, backend selection (a configured host bypasses the gateway; an unconfigured one falls back to it), public URLs derived from the host endpoint, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
 | `update` | the local-checkout updater offline: ahead/behind parsing, dirty/detached/not-a-checkout refusals, check/update/restart actions, the single-update lock, restart command construction, a **real local-git integration** (bare origin + clone: fast-forward, package.json-aware install skip, rebuild, host-change detection, idempotent rerun), and the update route's GET/POST registration with malformed-body/unknown-action refusal |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, that a throwing frame observer stops the loop instead of hot-looping, and the selection highlight: one copy at the picked mesh's world position, its pixels visibly shifted towards the accent, and clearing it returning the frame to the unselected image |

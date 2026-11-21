@@ -10,15 +10,21 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  clearDirect,
+  configureDirect,
+  directConfig,
+  directS3Uri,
   fetchObjectBytes,
   formatBytes,
   formatDate,
+  hasDirect,
   hostLibrary,
   isUsdKey,
   listPrefix,
   publicAssetUrl,
   s3Uri,
   searchFiles,
+  testDirect,
 } from './objstore.js'
 import { dirOf, normalizePath, resolvePath, s3KeyOf } from './remote.js'
 import { readS3Asset } from './s3open.js'
@@ -158,6 +164,32 @@ const FOOT = {
   textOverflow: 'ellipsis',
 }
 
+const CONNECT = {
+  flex: '0 0 auto',
+  padding: '6px 8px',
+  borderBottom: '1px solid ' + BORDER,
+  background: SURFACE,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 5,
+}
+
+const CONNECT_ROW = { display: 'flex', gap: 5, alignItems: 'center' }
+
+const CONNECT_INPUT = {
+  flex: '1 1 0',
+  minWidth: 0,
+  padding: '3px 6px',
+  borderRadius: 5,
+  border: '1px solid ' + BORDER,
+  background: BASE,
+  color: LABEL,
+  font: 'inherit',
+  fontSize: 11,
+}
+
+const CONNECT_HINT = { color: LABEL_DIM, fontSize: 10, lineHeight: 1.4 }
+
 function smallButton(primary) {
   const filled = primary === true
   return {
@@ -194,6 +226,19 @@ export function UsdObjectStoreBody(props) {
   })
   /** The host's reported library (endpoint/bucket/rootPrefix), or undefined. */
   const [library, setLibrary] = useState(undefined)
+  /** Browser-direct connection (non-secret half), or undefined. */
+  const [direct, setDirect] = useState(() => directConfig())
+  const [showConnect, setShowConnect] = useState(() => directConfig() === undefined)
+  const [form, setForm] = useState(() => ({
+    endpoint: 'https://s3.twinasset.art',
+    bucket: 'asset',
+    region: 'us-east-1',
+    rootPrefix: 'L0/',
+    accessKey: '',
+    secretKey: '',
+  }))
+  const [connectBusy, setConnectBusy] = useState(false)
+  const [connectError, setConnectError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('')
@@ -215,6 +260,44 @@ export function UsdObjectStoreBody(props) {
       return fallback
     }
   }, [t])
+
+  const setField = useCallback((name, value) => {
+    setForm(current => ({ ...current, [name]: value }))
+  }, [])
+
+  const connect = useCallback(async () => {
+    if (connectBusy) return
+    setConnectBusy(true)
+    setConnectError(null)
+    try {
+      const result = configureDirect(form)
+      if (typeof result === 'string') {
+        setConnectError(result)
+        return
+      }
+      await testDirect(undefined)
+      setDirect(result)
+      setShowConnect(false)
+      setForm(current => ({ ...current, accessKey: '', secretKey: '' }))
+      // Reload from the root of the newly configured connection.
+      controllerRef.current?.abort()
+      setFilter('')
+      void load('')
+    } catch (error) {
+      clearDirect()
+      setConnectError('objstoreDirectFailed')
+    } finally {
+      setConnectBusy(false)
+    }
+  }, [connectBusy, form, load])
+
+  const disconnect = useCallback(() => {
+    clearDirect()
+    setDirect(undefined)
+    setShowConnect(true)
+    setPayload({ entries: [], allowedPrefixes: [], truncated: false, bucket: 'asset', rootPrefix: '', continuationToken: null })
+    setPrefix('')
+  }, [])
 
   const load = useCallback(async (nextPrefix, options = {}) => {
     controllerRef.current?.abort()
@@ -379,7 +462,8 @@ export function UsdObjectStoreBody(props) {
       const rootBytes = await fetchObjectBytes(rootKey)
       openDroppedStage({
         remoteStage: {
-          uri: s3Uri(library?.bucket ?? payload.bucket, rootKey),
+          uri: (hasDirect() ? directS3Uri(rootKey) : undefined)
+            ?? s3Uri(library?.bucket ?? payload.bucket, rootKey),
           kind: 's3',
           label: entry.name || rootKey,
           rootKey,
@@ -446,6 +530,65 @@ export function UsdObjectStoreBody(props) {
           {label('objstoreRefresh', 'Refresh')}
         </button>
       </div>
+
+      {direct === undefined ? null : (
+        <div style={CONNECT_ROW}>
+          <span style={{ ...CONNECT_HINT, color: LABEL }}>{label('objstoreConnected', 'Direct')}: {direct.endpoint} / {direct.bucket}</span>
+          <button type="button" style={smallButton(false)} onClick={disconnect}>
+            {label('objstoreDisconnect', 'Disconnect')}
+          </button>
+        </div>
+      )}
+      {showConnect ? (
+        <div style={CONNECT}>
+          <span style={CONNECT_HINT}>{label('objstoreConnectHint', 'Connect straight to MinIO / S3 — credentials stay in this page only.')}</span>
+          <div style={CONNECT_ROW}>
+            <input style={CONNECT_INPUT} type="text" spellCheck={false} value={form.endpoint}
+              placeholder="https://s3.example.com"
+              aria-label={label('objstoreEndpoint', 'Endpoint')}
+              onChange={event => setField('endpoint', event.target.value)} />
+            <input style={{ ...CONNECT_INPUT, maxWidth: 110 }} type="text" spellCheck={false} value={form.bucket}
+              placeholder="bucket"
+              aria-label={label('objstoreBucket', 'Bucket')}
+              onChange={event => setField('bucket', event.target.value)} />
+            <input style={{ ...CONNECT_INPUT, maxWidth: 100 }} type="text" spellCheck={false} value={form.region}
+              placeholder="us-east-1"
+              aria-label={label('objstoreRegion', 'Region')}
+              onChange={event => setField('region', event.target.value)} />
+          </div>
+          <div style={CONNECT_ROW}>
+            <input style={CONNECT_INPUT} type="text" spellCheck={false} value={form.accessKey}
+              placeholder={label('objstoreAccessKey', 'Access Key')}
+              aria-label={label('objstoreAccessKey', 'Access Key')}
+              onChange={event => setField('accessKey', event.target.value)} />
+            <input style={CONNECT_INPUT} type="password" spellCheck={false} value={form.secretKey}
+              placeholder={label('objstoreSecretKey', 'Secret Key')}
+              aria-label={label('objstoreSecretKey', 'Secret Key')}
+              onKeyDown={event => { if (event.key === 'Enter') void connect() }}
+              onChange={event => setField('secretKey', event.target.value)} />
+          </div>
+          <div style={CONNECT_ROW}>
+            <input style={CONNECT_INPUT} type="text" spellCheck={false} value={form.rootPrefix}
+              placeholder={label('objstoreRoot', 'Root prefix')}
+              aria-label={label('objstoreRoot', 'Root prefix')}
+              onChange={event => setField('rootPrefix', event.target.value)} />
+            <button type="button" style={smallButton(true)} disabled={connectBusy} onClick={() => void connect()}>
+              {connectBusy ? label('objstoreTesting', 'Verifying…') : label('objstoreConnectOk', 'Connect')}
+            </button>
+          </div>
+          {connectError === null ? null : (
+            <span style={{ color: ERROR, fontSize: 10 }}>
+              {connectError === 'direct-bad-endpoint'
+                ? label('objstoreDirectBadEndpoint', 'Endpoint must start with http(s)://')
+                : connectError === 'direct-bad-bucket'
+                  ? label('objstoreDirectBadBucket', 'Bucket name contains invalid characters')
+                  : connectError === 'direct-missing-keys'
+                    ? label('objstoreDirectMissingKeys', 'Enter both the Access Key and Secret Key')
+                    : label('objstoreDirectFailed', 'Direct connection failed: check the endpoint, CORS and credentials')}
+            </span>
+          )}
+        </div>
+      ) : null}
 
       <div style={CRUMBS}>
         {breadcrumbs.map((crumb, index) => (
