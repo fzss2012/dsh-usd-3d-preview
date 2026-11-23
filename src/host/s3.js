@@ -5,7 +5,8 @@
  * A browser cannot sign such a request, so this module does the one thing the
  * browser cannot: it signs a plain read-only GET.
  *
- * Configuration is environment-only, never a configuration file:
+ * The library is described in two places, and this module only signs for
+ * whichever one resolves (see `index.js`):
  *
  *   DSH_USD_S3_ENDPOINT    base URL of the S3-compatible service (required)
  *   DSH_USD_S3_BUCKET      bucket the `s3://` URIs name (default `asset`)
@@ -14,6 +15,10 @@
  *   DSH_USD_S3_SECRET_KEY  secret access key (required)
  *   DSH_USD_S3_ROOT_PREFIX key prefix the sidebar browser is confined to
  *                          (default: the whole bucket)
+ *
+ * The environment is authoritative; the connection a user saves from the
+ * sidebar (see `config.js`) is read only when the environment names no library,
+ * so a deployment's own configuration is never shadowed from a browser.
  *
  * Everything here is a read: no upload, no policy change, no new account, and
  * the credentials are only ever held in memory for the lifetime of one signing.
@@ -423,6 +428,41 @@ export async function searchFiles(library, prefix, options = {}) {
   }
   entries.sort((left, right) => left.key.localeCompare(right.key, undefined, { numeric: true, sensitivity: 'base' }))
   return { entries, scanned, truncated }
+}
+
+/**
+ * Verify one candidate library with the smallest listing a signed request allows.
+ *
+ * The Connect panel must not save a connection that cannot be used, so the route
+ * asks first: one ListObjectsV2 page of one key at the configured root. A 403 is
+ * a credential or policy answer, a 404 a missing bucket, and anything else a
+ * transport failure -- the three cases the panel reports differently.
+ * @param library - the candidate library (endpoint, bucket, region, credentials, rootPrefix).
+ * @returns `{ ok: true }`, or `{ ok: false, reason }` with a stable code.
+ */
+export async function probeLibrary(library) {
+  const params = new URLSearchParams({
+    'list-type': '2',
+    delimiter: '/',
+    prefix: normalizeRootPrefix(library.rootPrefix),
+    'max-keys': '1',
+  })
+  const { url, headers } = signGetQuery({ ...library, query: '?' + params.toString() })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new Error('object storage probe timed out')), LIST_TIMEOUT_MS)
+  try {
+    const response = await fetch(url, { headers, signal: controller.signal })
+    if (response.status === 403) return { ok: false, reason: 'denied' }
+    if (response.status === 404) return { ok: false, reason: 'missing-bucket' }
+    if (!response.ok) return { ok: false, reason: 'unreachable' }
+    // The body is not inspected; draining it keeps the connection reusable.
+    await response.text().catch(() => undefined)
+    return { ok: true }
+  } catch {
+    return { ok: false, reason: 'unreachable' }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /** The suffixes the preview can open; a search keeps only these by default. */

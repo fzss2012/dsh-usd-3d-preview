@@ -26,7 +26,10 @@
  *   - `rels` — relationship target paths;
  *   - `meta` — `kind`, `doc`, `comment`, `active`, `displayName`, `customData`,
  *     `assetInfo`, `instanceable`, the composition arcs (`references`,
- *     `payload`, `inherits`, `specializes`) and `variantSets`.
+ *     `payload`, `inherits`, `specializes`), the declared `variantSets` with
+ *     their variant `variantNames`, and the authored `variants` selection map.
+ *     The arcs are kept because a reader that shows composition needs all of
+ *     them, not just the two that re-root a path.
  *
  * ## Why a hand-written lexer rather than a regex sweep
  *
@@ -53,6 +56,7 @@ const METADATA_KEYS = new Set([
   'variantSet', 'doc', 'comment', 'kind', 'customData', 'assetInfo', 'defaultPrim', 'metersPerUnit',
   'upAxis', 'endTimeCode', 'startTimeCode', 'timeCodesPerSecond', 'fallbackPrimTypes', 'apiSchemas',
   'displayName', 'active', 'instanceable', 'hidden', 'noLoadHint', 'properties', 'primChildren',
+  'variants',
 ])
 
 /**
@@ -69,6 +73,10 @@ const ARC_KEYS = new Set(['references', 'payload'])
 /** Which of those are worth keeping for a reader that shows a prim's properties. */
 const KEPT_PRIM_METADATA = new Set([
   'kind', 'doc', 'comment', 'active', 'displayName', 'customData', 'assetInfo', 'instanceable',
+  // A variant selection is a composition arc a reader has to see: "which variant
+  // is this prim showing" is asked as often as "what does it reference", and the
+  // selection is authored as metadata, not as an attribute.
+  'variants',
 ])
 
 /** Which layer-level metadata is kept. */
@@ -568,6 +576,14 @@ export class AsciiLayerReader {
       if (into !== undefined && into !== null && arcs.length > 0) into[key] = arcs
       return
     }
+    // A variant selection is a dictionary of set to authored variant — the
+    // generic dictionary reader would take its optional type annotation
+    // ("string") for a key, so it is read by its own parser.
+    if (key === 'variants') {
+      const selection = this.variantSelectionMap()
+      if (into !== undefined && into !== null && Object.keys(selection).length > 0) into.variants = selection
+      return
+    }
     const value = this.value()
     if (into === undefined || into === null) return
     if (key === 'variantSets' && Array.isArray(value)) {
@@ -721,19 +737,128 @@ export class AsciiLayerReader {
     }
   }
 
-  /** Consume a `variantSet` block; the variants themselves are resolved by the engine. */
+  /**
+   * Read a `variantSet` block: its name and the variant names it declares.
+   *
+   * The variants themselves are composed (the engine resolves them), but the
+   * *names* are the arc's shape and are what a composition reader shows: a set
+   * with no visible variants and a set of four cannot be told apart otherwise.
+   * The block's contents are skipped as balanced braces, so a variant's own
+   * prims and nested variant sets never disturb the outer scan.
+   * @param prim - the prim the set is declared under, or undefined before the first prim.
+   */
   variantSet(prim) {
     this.skip()
     const name = this.text[this.at] === '"' || this.text[this.at] === "'" ? this.string() : this.word()
-    if (prim !== undefined && typeof name === 'string' && name !== '' && !prim.meta.variantSets.includes(name)) {
-      prim.meta.variantSets.push(name)
-    }
     this.skip()
     if (this.text[this.at] === '=') this.at += 1
     this.skip()
-    if (this.text[this.at] === '{') this.skipBalanced('{', '}')
+    let variants
+    if (this.text[this.at] === '{') variants = this.variantNames()
     else this.skipValue()
+    if (prim !== undefined && typeof name === 'string' && name !== '') {
+      const sets = prim.meta.variantSets ?? (prim.meta.variantSets = [])
+      if (!sets.includes(name)) sets.push(name)
+      if (Array.isArray(variants) && variants.length > 0) {
+        const declared = prim.meta.variantNames ?? (prim.meta.variantNames = {})
+        const known = declared[name] ?? (declared[name] = [])
+        for (const variant of variants) if (!known.includes(variant)) known.push(variant)
+      }
+    }
     this.modifiers = []
+  }
+
+  /**
+   * Read a `variants` metadata value: set to authored variant, as a map.
+   *
+   * USD spells it as a dictionary whose keys carry an explicit type annotation —
+   * `{ string modeling = "simple" string look = "red" }` — which is why the
+   * generic dictionary parser is not used here: it would store "string" as the
+   * first key.
+   * @returns the selection map, empty when the value is not a dictionary.
+   */
+  variantSelectionMap() {
+    this.skip()
+    const out = {}
+    if (this.text[this.at] !== '{') {
+      this.skipValue()
+      return out
+    }
+    this.at += 1
+    for (;;) {
+      this.skip()
+      const char = this.text[this.at]
+      if (char === undefined) return out
+      if (char === '}') {
+        this.at += 1
+        return out
+      }
+      if (char === ',' || char === ';') {
+        this.at += 1
+        continue
+      }
+      const before = this.at
+      let key = this.text[this.at] === '"' || this.text[this.at] === "'" ? this.string() : this.word()
+      // The optional type annotation sits between the brace and the first key of
+      // each entry (`string` for a selection map).
+      if (key === 'string' || key === 'token') {
+        this.skip()
+        key = this.text[this.at] === '"' || this.text[this.at] === "'" ? this.string() : this.word()
+      }
+      this.skip()
+      if (this.text[this.at] === '=' || this.text[this.at] === ':') this.at += 1
+      this.skip()
+      let value
+      if (this.text[this.at] === '"' || this.text[this.at] === "'") value = this.string()
+      else {
+        value = this.word()
+        if (value === '') value = undefined
+      }
+      if (typeof key === 'string' && key !== '' && typeof value === 'string' && value !== '') out[key] = value
+      if (this.at === before) this.at += 1
+    }
+  }
+
+  /**
+   * Read the names a `variantSet` block declares, consuming the block.
+   *
+   * A variant name is a quoted string followed by its own block (and optionally
+   * a metadata block); each is skipped whole, so only depth-one names are
+   * collected. Anything unexpected is skipped rather than misread as a name —
+   * a malformed block must cost the variant list, not the rest of the layer.
+   * @returns the variant names in authored order.
+   */
+  variantNames() {
+    const names = []
+    this.at += 1
+    for (;;) {
+      this.skip()
+      const char = this.text[this.at]
+      if (char === undefined) return names
+      if (char === '}') {
+        this.at += 1
+        return names
+      }
+      if (char === ',' || char === ';') {
+        this.at += 1
+        continue
+      }
+      const before = this.at
+      if (char === '"' || char === "'") {
+        const name = this.string()
+        if (name !== '' && !names.includes(name)) names.push(name)
+        this.skip()
+        if (this.text[this.at] === '(') this.skipBalanced('(', ')')
+        this.skip()
+        if (this.text[this.at] === '{') this.skipBalanced('{', '}')
+        else this.skipValue()
+        continue
+      }
+      // Anything else inside a variant set is not a variant declaration; the
+      // generic value skipper keeps the scan inside the brace.
+      this.skipValue()
+      if (this.at === before) this.at += 1
+    }
   }
 
   /** Read a relationship: `rel name = <path>` or a list of paths. */
@@ -932,6 +1057,18 @@ export function mergePrim(into, from, specifier) {
     if (key === 'variantSets') {
       for (const set of from.meta.variantSets) {
         if (!into.meta.variantSets.includes(set)) into.meta.variantSets.push(set)
+      }
+      continue
+    }
+    // Declared variant names are facts about the arc, so every layer's
+    // declarations are kept rather than only the strongest layer's: a weaker
+    // layer naming a variant the stronger one forgot is still part of the
+    // composition, and dropping it would make the panel claim a set is empty.
+    if (key === 'variantNames') {
+      const intoNames = into.meta.variantNames ?? (into.meta.variantNames = {})
+      for (const [set, names] of Object.entries(from.meta.variantNames)) {
+        const known = intoNames[set] ?? (intoNames[set] = [])
+        for (const name of names) if (!known.includes(name)) known.push(name)
       }
       continue
     }

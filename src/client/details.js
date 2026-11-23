@@ -26,6 +26,25 @@
  * came from, so an unexpected value still points at its source. A prim the layers do
  * not describe reports exactly that instead of an empty panel.
  *
+ * ## Complete composition arcs
+ *
+ * A prim's composition is all six arc kinds LIVRPS names — sublayers, inherits,
+ * variant sets, references, payloads and specializes — and the panel that claims
+ * to show "the composition" has to carry all of them, not just the two that
+ * re-root a path. The reader reports the references and payloads (with the layer
+ * that authored each and the layer/prim it resolves to), the inherits and
+ * specializes paths, the declared variant sets with their variant names, and the
+ * authored variant selection. Layers are reported too, each with the arc it was
+ * reached through (root, sublayer, reference, payload), so a value pulled from a
+ * referenced file stays traceable to the arc that placed it there.
+ *
+ * Both containers are covered: the ASCII reader keeps the arcs it already scans,
+ * and the crate path decodes the list-op value types three's parser skips
+ * (`references`, `payload`, `inheritPaths`, `specializes`,
+ * `variantSetNames`, `subLayers`). A container this reader cannot decode
+ * faithfully is reported as unreadable rather than presented as declarations —
+ * a shifted crate path table is a wrong answer, not a partial one.
+ *
  * ## Composed paths
  *
  * One thing it *does* follow is the path. Composition re-roots a referenced or
@@ -64,6 +83,15 @@ const VARIABILITY_UNIFORM = 1
 
 /** Crate quaternions are stored (i, j, k, real); USD text writes (real, i, j, k). */
 const QUATERNION_TYPES = new Set(['quatf', 'quatd', 'quath'])
+
+/**
+ * Crate vector value-type enums whose inlined form packs int8 components.
+ *
+ * OpenUSD inlines a vector when every component fits an int8; three decodes
+ * that for the float-vector enums only, so the double and half spellings are
+ * recovered here (see crateInlinedVectorValues).
+ */
+const INLINE_VECTOR_DIMENSIONS = new Map([[19, 2], [21, 2], [23, 3], [25, 3], [27, 4], [29, 4]])
 
 /** How many elements of a long array the panel previews. */
 const PREVIEW_ELEMENTS = 4
@@ -132,7 +160,9 @@ async function layerBytesOf(sources) {
     else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
     else if (typeof Blob !== 'undefined' && value instanceof Blob) bytes = new Uint8Array(await value.arrayBuffer())
     if (bytes === undefined || bytes.byteLength === 0) return
-    entries.push({ key: String(key), bytes })
+    // The source value stays on the entry so a caller can tell two spellings of one
+    // blob (the engine registers aliases) from two layers with the same content.
+    entries.push({ key: String(key), bytes, source: value })
   }
   if (sources instanceof Map) {
     for (const [key, value] of sources) await collect(key, value)
@@ -230,6 +260,57 @@ function crateApiSchemas(parser) {
   }
 }
 
+/**
+ * Decode inlined vector defaults that three's parser hands back as a scalar.
+ *
+ * OpenUSD writes a vector inline when every component is exactly representable
+ * as int8; three decodes that for its float-vector enum values but not for the
+ * double and half ones, so a `double3 xformOp:translate` arrives as the raw
+ * 32-bit payload (often just the x component). The declared type says the value
+ * is a vector and the rep packs the components as int8, so they are recovered
+ * here. Every attribute is scanned, because any vector attribute can be
+ * authored in its inline form — not just the transform ops a rig needs.
+ * @param parser - the parser instance after its parseData call.
+ * @returns a map of property path to the decoded component array.
+ */
+function crateInlinedVectorValues(parser) {
+  const out = new Map()
+  try {
+    const { paths, specs, fields, fieldSets, tokens } = parser
+    if (!Array.isArray(paths) || !Array.isArray(specs)) return out
+    if (!Array.isArray(fields) || !Array.isArray(fieldSets) || !Array.isArray(tokens)) return out
+    for (const spec of specs) {
+      if (spec.specType !== SPEC_ATTRIBUTE) continue
+      const path = paths[spec.pathIndex]
+      if (typeof path !== 'string' || path === '') continue
+      let at = spec.fieldSetIndex
+      for (let guard = 0; guard < 4096; guard += 1) {
+        const fieldIndex = fieldSets[at]
+        if (fieldIndex === undefined || fieldIndex === FIELD_SET_END || fieldIndex === 0xFFFFFFFF) break
+        at += 1
+        const field = fields[fieldIndex]
+        if (field === undefined) break
+        if (tokens[field.tokenIndex] !== 'default') continue
+        const rep = field.valueRep
+        if (rep === undefined || rep.isInlined !== true) break
+        const dimension = INLINE_VECTOR_DIMENSIONS.get(rep.typeEnum)
+        if (dimension === undefined) break
+        const components = new Array(dimension)
+        for (let index = 0; index < dimension; index += 1) {
+          const byte = (rep.lo >>> (8 * index)) & 0xFF
+          components[index] = byte > 0x7F ? byte - 0x100 : byte
+        }
+        out.set(path, components)
+        break
+      }
+    }
+  } catch {
+    // A container this build decodes differently keeps three's values; the
+    // panel still states the declared type beside them.
+  }
+  return out
+}
+
 /** The `specifier` enum of a crate prim spec, spelled the way a layer writes it. */
 function specifierOf(value) {
   if (value === 1) return 'over'
@@ -262,16 +343,27 @@ function crateQuaternion(value) {
  *   loadable in a context that has no USD loader).
  * @returns the prim map, or undefined when the container cannot be decoded.
  */
-function readCratePrims(bytes, USDCParser) {
+function readCratePrims(bytes, USDCParser, options = {}) {
+  const withAttributes = options.withAttributes !== false
   const buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
     ? bytes.buffer
     : bytes.slice().buffer
   const parser = new USDCParser()
   parser.parseData(buffer)
+  // The path table decides every declaration below: a shifted table is not a
+  // reason to guess. Both checks read the parser's own decoded state, so a layer
+  // this build cannot decode is reported rather than shown as garbage.
+  if (cratePathsTrustworthy(parser) === false) return undefined
+  const arcs = crateArcs(parser)
+  if (arcs.ok === false) return undefined
   const specs = parser.specsByPath ?? {}
   const meta = crateLayerMeta(specs)
+  if (arcs.subLayers.length > 0) meta.subLayers = [...arcs.subLayers]
   const apiSchemas = crateApiSchemas(parser)
   const attributeFields = crateAttributeFields(specs)
+  // Attribute values are not needed for a composition-only decode, and the
+  // inlined-vector repair scans every attribute spec.
+  const inlinedVectors = withAttributes === false ? new Map() : crateInlinedVectorValues(parser)
   const prims = new Map()
   const properties = []
   for (const path of Object.keys(specs)) {
@@ -297,6 +389,19 @@ function readCratePrims(bytes, USDCParser) {
       properties.push(path)
     }
   }
+  // The arcs three's parser skips are attached to the same prim records the
+  // details reader consumes, so an ASCII layer and a crate produce one record
+  // shape: every consumer of an arc stays container-agnostic.
+  for (const [path, arcsOfPrim] of arcs.prims) {
+    const prim = prims.get(path)
+    if (prim === undefined) continue
+    if (arcsOfPrim.references !== undefined) prim.meta.references = arcsOfPrim.references
+    if (arcsOfPrim.payload !== undefined) prim.meta.payload = arcsOfPrim.payload
+    if (arcsOfPrim.inherits !== undefined) prim.meta.inherits = arcsOfPrim.inherits
+    if (arcsOfPrim.specializes !== undefined) prim.meta.specializes = arcsOfPrim.specializes
+    if (arcsOfPrim.variantSets !== undefined) prim.meta.variantSets = [...arcsOfPrim.variantSets]
+    if (arcsOfPrim.variants !== undefined) prim.meta.variants = arcsOfPrim.variants
+  }
   for (const path of properties) {
     const cut = path.lastIndexOf('.')
     if (cut <= path.lastIndexOf('/')) continue
@@ -306,8 +411,20 @@ function readCratePrims(bytes, USDCParser) {
     const spec = specs[path]
     const fields = spec.fields ?? {}
     if (spec.specType === SPEC_RELATIONSHIP) {
+      if (withAttributes === false) continue
       const targets = Array.isArray(fields.targetPaths) ? fields.targetPaths : []
       owner.rels[name] = targets.filter(target => typeof target === 'string' && target.startsWith('/'))
+      continue
+    }
+    // A composition read wants the prims and their arcs, not a solved robot's
+    // million-point arrays: the declared types are cheap to keep, the values are
+    // what cost memory, so the caller decides whether to materialise them.
+    if (withAttributes === false) {
+      const declaredOnly = attributeFields.get(path) ?? {}
+      const declaredName = typeof declaredOnly.typeName === 'string'
+        ? declaredOnly.typeName
+        : (typeof fields.typeName === 'string' ? fields.typeName : '')
+      if (declaredName !== '') owner.attrTypes[name] = declaredName
       continue
     }
     const declared = attributeFields.get(path) ?? {}
@@ -318,7 +435,10 @@ function readCratePrims(bytes, USDCParser) {
     const rawType = typeof declared.typeName === 'string' && declared.typeName !== ''
       ? declared.typeName
       : (typeof fields.typeName === 'string' ? fields.typeName : '')
-    const value = fields.default
+    // An inlined vector arrives as its raw scalar payload; the repaired component
+    // array is what the declared fixed-width type promises.
+    const repaired = inlinedVectors.get(path)
+    const value = repaired !== undefined && typeof fields.default === 'number' ? repaired : fields.default
     const declaredType = rawType
     if (declaredType !== '') owner.attrTypes[name] = declaredType
     const flags = {}
@@ -373,7 +493,310 @@ function crateLayerMeta(specs) {
   if (typeof fields.documentation === 'string' && fields.documentation !== '') meta.doc = fields.documentation
   if (typeof fields.metersPerUnit === 'number') meta.metersPerUnit = fields.metersPerUnit
   if (typeof fields.upAxis === 'string') meta.upAxis = fields.upAxis
+  if (typeof fields.startTimeCode === 'number') meta.startTimeCode = fields.startTimeCode
+  if (typeof fields.endTimeCode === 'number') meta.endTimeCode = fields.endTimeCode
+  if (typeof fields.timeCodesPerSecond === 'number') meta.timeCodesPerSecond = fields.timeCodesPerSecond
   return meta
+}
+
+// ── crate composition arcs ─────────────────────────────────────────────────
+//
+// three's crate parser decodes what composition needs to draw — prims, paths,
+// attributes — and deliberately skips the list-op value types (references,
+// payload, inheritPaths, specializes, variantSetNames, subLayers) with a console
+// warning, because a renderer does not need to know which layer an opinion came
+// from. A composition reader does: those fields *are* the arcs. They are
+// decoded from the raw value reps here, following the crate format's list-op
+// layout: a flags byte, then the present lists in serialization order, each a
+// uint64 count followed by fixed-size items. Reading the field table rather than
+// re-parsing the bytes keeps one parse per layer.
+
+/** Crate value-type enums for the list-ops this reader decodes (crateDataTypes.h). */
+const TYPE_STRING_LIST_OP = 33
+const TYPE_PATH_LIST_OP = 34
+const TYPE_REFERENCE_LIST_OP = 35
+const TYPE_STRING_VECTOR = 50
+const TYPE_PAYLOAD_LIST_OP = 55
+
+/** List-op flags in the order the format writes them: explicit, added, prepended, appended, deleted, ordered. */
+const LIST_OP_LISTS = Object.freeze([0x02, 0x04, 0x20, 0x40, 0x08, 0x10])
+
+/** A crate field name to the spelling a USDA layer uses, when the two differ. */
+const CRATE_ARC_FIELDS = Object.freeze({
+  references: 'references',
+  payload: 'payload',
+  inheritPaths: 'inherits',
+  specializes: 'specializes',
+  variantSetNames: 'variantSets',
+  variantSelection: 'variants',
+})
+
+/**
+ * A reader bound to one parsed crate layer's tables.
+ *
+ * The arc payloads are byte offsets into the same buffer three parsed, and the
+ * items are indices into the already-decoded token/string/path tables — so one
+ * object with the DataView and those three tables is all the decoders need.
+ * @param parser - the parser instance after its parseData call.
+ * @returns the context, or undefined when the tables are not readable.
+ */
+function crateArcContext(parser) {
+  const view = parser.buffer instanceof ArrayBuffer ? new DataView(parser.buffer) : undefined
+  if (view === undefined) return undefined
+  const { tokens, strings, paths } = parser
+  if (!Array.isArray(tokens) || !Array.isArray(strings) || !Array.isArray(paths)) return undefined
+  return { view, tokens, strings, paths }
+}
+
+/** The string a crate string index names (its string table stores token indices). */
+function crateString(ctx, stringIndex) {
+  const tokenIndex = ctx.strings[stringIndex]
+  return typeof tokenIndex === 'number' ? (ctx.tokens[tokenIndex] ?? '') : ''
+}
+
+/**
+ * Read one list-op value into its elements.
+ *
+ * Walks the flags byte and every list it announces, in the serialization order
+ * the format fixes; each item reader advances the cursor and may decline an
+ * element (value undefined) while still moving the cursor, which keeps a
+ * malformed item from desynchronising the ones after it.
+ * @param ctx - the crate tables.
+ * @param start - byte offset of the list-op payload.
+ * @param readItem - a function of (ctx, cursor) returning { cursor, value }.
+ * @returns the values in flag order; empty when the value cannot be read.
+ */
+function readCrateListOp(ctx, start, readItem) {
+  const { view } = ctx
+  let cursor = start
+  const out = []
+  if (!(start >= 0) || start >= view.byteLength) return out
+  const flags = view.getUint8(cursor)
+  cursor += 1
+  for (const mask of LIST_OP_LISTS) {
+    if ((flags & mask) === 0) continue
+    if (cursor + 8 > view.byteLength) return out
+    const count = Number(view.getBigUint64(cursor, true))
+    cursor += 8
+    for (let index = 0; index < count; index += 1) {
+      const item = readItem(ctx, cursor)
+      if (item === undefined || item.cursor <= cursor) return out
+      cursor = item.cursor
+      if (item.value !== undefined) out.push(item.value)
+    }
+  }
+  return out
+}
+
+/** One path index of a path list-op (inherits, specializes). */
+function readCratePathItem(ctx, cursor) {
+  if (cursor + 4 > ctx.view.byteLength) return undefined
+  const index = ctx.view.getUint32(cursor, true)
+  const path = ctx.paths[index]
+  return { cursor: cursor + 4, value: typeof path === 'string' && path !== '' ? path : undefined }
+}
+
+/** One string index of a string list-op (variantSetNames). */
+function readCrateStringItem(ctx, cursor) {
+  if (cursor + 4 > ctx.view.byteLength) return undefined
+  const index = ctx.view.getUint32(cursor, true)
+  const value = crateString(ctx, index)
+  return { cursor: cursor + 4, value: value === '' ? undefined : value }
+}
+
+/**
+ * Skip a crate VtDictionary value, returning the cursor past it.
+ *
+ * Every entry is a key token index followed by an int64 offset to the value's
+ * rep; the rep sits at that offset and the next entry starts just past it. The
+ * values themselves are never needed for an arc (only their presence), so they
+ * are stepped over rather than decoded.
+ * @param ctx - the crate tables.
+ * @param cursor - byte offset of the dictionary's element count.
+ * @returns the cursor past the dictionary, or undefined when it cannot be walked.
+ */
+function skipCrateDictionary(ctx, cursor) {
+  const { view } = ctx
+  if (cursor + 8 > view.byteLength) return undefined
+  const entries = Number(view.getBigUint64(cursor, true))
+  cursor += 8
+  for (let index = 0; index < entries; index += 1) {
+    if (cursor + 12 > view.byteLength) return undefined
+    cursor += 4
+    const relative = Number(view.getBigInt64(cursor, true))
+    cursor += relative + 8
+    if (cursor < 0 || cursor > view.byteLength) return undefined
+  }
+  return cursor
+}
+
+/** One SdfReference of a reference list-op. */
+function readCrateReferenceItem(ctx, cursor) {
+  const { view } = ctx
+  if (cursor + 8 > view.byteLength) return undefined
+  const assetIndex = view.getUint32(cursor, true)
+  const pathIndex = view.getUint32(cursor + 4, true)
+  cursor += 8
+  // SdfLayerOffset: offset and scale doubles.
+  if (cursor + 16 > view.byteLength) return undefined
+  cursor += 16
+  cursor = skipCrateDictionary(ctx, cursor)
+  if (cursor === undefined) return undefined
+  const asset = crateString(ctx, assetIndex)
+  const primPath = ctx.paths[pathIndex]
+  const value = asset === ''
+    ? undefined
+    : { asset, prim: typeof primPath === 'string' && primPath !== '' ? primPath : undefined }
+  return { cursor, value }
+}
+
+/** One SdfPayload of a payload list-op (crate 0.8+ always writes its layer offset). */
+function readCratePayloadItem(ctx, cursor) {
+  const { view } = ctx
+  if (cursor + 8 > view.byteLength) return undefined
+  const assetIndex = view.getUint32(cursor, true)
+  const pathIndex = view.getUint32(cursor + 4, true)
+  cursor += 8
+  if (cursor + 16 > view.byteLength) return undefined
+  cursor += 16
+  const asset = crateString(ctx, assetIndex)
+  const primPath = ctx.paths[pathIndex]
+  const value = asset === ''
+    ? undefined
+    : { asset, prim: typeof primPath === 'string' && primPath !== '' ? primPath : undefined }
+  return { cursor, value }
+}
+
+/**
+ * Whether a crate layer's path table decoded into paths this reader can trust.
+ *
+ * three trusts the first path count in the file, but the format can encode a
+ * different number of paths than the table holds ("we do not write out the empty
+ * path"), so a crate containing variant specs can come back with every path
+ * shifted: prim names become metadata tokens, several specs collide on the empty
+ * path, and every table built from them is nonsense. Rather than present that as
+ * declarations, the layer is reported as unreadable — the honest answer.
+ * @param parser - the parser instance after its parseData call.
+ * @returns whether the prim paths are well-formed and unique.
+ */
+function cratePathsTrustworthy(parser) {
+  try {
+    const { paths, specs } = parser
+    if (!Array.isArray(paths) || !Array.isArray(specs)) return false
+    const seen = new Set()
+    for (const spec of specs) {
+      if (spec.specType !== SPEC_PRIM) continue
+      const path = paths[spec.pathIndex]
+      if (typeof path !== 'string') return false
+      if (path === '' || path === '/') continue
+      if (!path.startsWith('/')) return false
+      for (const segment of path.slice(1).split('/')) {
+        if (segment === '' || /[\s.{}@#]/.test(segment)) return false
+      }
+      if (seen.has(path)) return false
+      seen.add(path)
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The composition arcs a crate layer declares, decoded from its field table.
+ *
+ * Returns the same shape an ASCII layer puts on each prim's meta — the
+ * composition module must not care which container authored an arc — plus the
+ * layer-level subLayers list that re-roots nothing but stacks more layers.
+ * A layer whose path table is corrupt yields a not-ok result rather than a
+ * half-decoded arc list.
+ * @param parser - the parser instance after its parseData call.
+ * @returns an object with ok, a prim path to meta map, and the subLayers list.
+ */
+function crateArcs(parser) {
+  const ctx = crateArcContext(parser)
+  if (ctx === undefined || cratePathsTrustworthy(parser) === false) return { ok: false, prims: new Map(), subLayers: [] }
+  const prims = new Map()
+  const subLayers = []
+  // The parser's spec array carries the raw table indexes; the decoded fields live
+  // in its specsByPath map. Both are needed: list ops come from the raw tables,
+  // and the variant selection map is one of the values three already decoded.
+  const decoded = parser.specsByPath ?? {}
+  try {
+    for (const spec of parser.specs) {
+      const path = parser.paths[spec.pathIndex]
+      if (spec.specType === SPEC_PSEUDO_ROOT) {
+        // The pseudo-root stores the layer stack as a StringVector: a count then
+        // one string-table index per sublayer. Its decoded value is never used —
+        // three leaves the unsupported type null — so the raw field rep is read.
+        let at = spec.fieldSetIndex
+        for (let guard = 0; guard < 4096; guard += 1) {
+          const fieldIndex = parser.fieldSets[at]
+          if (fieldIndex === undefined || fieldIndex === FIELD_SET_END || fieldIndex === 0xFFFFFFFF) break
+          at += 1
+          const field = parser.fields[fieldIndex]
+          if (field === undefined) break
+          if (parser.tokens[field.tokenIndex] !== 'subLayers') continue
+          const rep = field.valueRep
+          if (rep === undefined || rep.typeEnum !== TYPE_STRING_VECTOR) break
+          const start = rep.payload
+          if (!(start > 0) || start >= ctx.view.byteLength) break
+          let cursor = start
+          const count = Number(ctx.view.getBigUint64(cursor, true))
+          cursor += 8
+          for (let index = 0; index < count; index += 1) {
+            if (cursor + 4 > ctx.view.byteLength) break
+            const value = crateString(ctx, ctx.view.getUint32(cursor, true))
+            cursor += 4
+            if (value !== '') subLayers.push(value)
+          }
+          break
+        }
+        continue
+      }
+      if (spec.specType !== SPEC_PRIM || typeof path !== 'string' || path === '') continue
+      const arcs = {}
+      let at = spec.fieldSetIndex
+      for (let guard = 0; guard < 4096; guard += 1) {
+        const fieldIndex = parser.fieldSets[at]
+        if (fieldIndex === undefined || fieldIndex === FIELD_SET_END || fieldIndex === 0xFFFFFFFF) break
+        at += 1
+        const field = parser.fields[fieldIndex]
+        if (field === undefined) break
+        const name = parser.tokens[field.tokenIndex]
+        const key = CRATE_ARC_FIELDS[name]
+        if (key === undefined) continue
+        const rep = field.valueRep
+        if (rep === undefined || rep.isInlined === true) continue
+        // The value type decides the layout, so a field read through the wrong
+        // enum is skipped instead of misparsed; the field name then only says
+        // which arc key the decoded list belongs to.
+        let values
+        if (key === 'variants') {
+          const selection = decoded[path]?.fields?.variantSelection
+          values = selection !== null && typeof selection === 'object'
+            ? Object.fromEntries(Object.entries(selection).filter(([, value]) => typeof value === 'string' && value !== ''))
+            : undefined
+        } else if (rep.typeEnum === TYPE_REFERENCE_LIST_OP) {
+          values = readCrateListOp(ctx, rep.payload, readCrateReferenceItem)
+        } else if (rep.typeEnum === TYPE_PAYLOAD_LIST_OP) {
+          values = readCrateListOp(ctx, rep.payload, readCratePayloadItem)
+        } else if (rep.typeEnum === TYPE_PATH_LIST_OP) {
+          values = readCrateListOp(ctx, rep.payload, readCratePathItem)
+        } else if (rep.typeEnum === TYPE_STRING_LIST_OP) {
+          values = readCrateListOp(ctx, rep.payload, readCrateStringItem)
+        }
+        if (values === undefined) continue
+        if (Array.isArray(values) && values.length === 0) continue
+        if (key === 'variants' && Object.keys(values).length === 0) continue
+        arcs[key] = values
+      }
+      if (Object.keys(arcs).length > 0) prims.set(path, arcs)
+    }
+  } catch {
+    return { ok: false, prims: new Map(), subLayers: [] }
+  }
+  return { ok: true, prims, subLayers }
 }
 
 /** Whether a crate default is a list of values (rather than one value). */
@@ -559,21 +982,54 @@ export function formatValue(value, declaredType, size) {
  */
 
 /**
+ * @typedef {object} DetailArc
+ * @property {'reference'|'payload'} kind - which arc this is.
+ * @property {string} asset - the `@…@` body as authored.
+ * @property {string} prim - the arc's own prim path, '' when it relies on the
+ *   referenced layer's `defaultPrim`.
+ * @property {string} layer - the layer that authored the arc.
+ * @property {string} targetLayer - the composed layer the asset resolves to,
+ *   '' when this stage did not compose it.
+ * @property {string} targetPrim - the prim the arc composes (the arc path, or
+ *   the referenced layer's `defaultPrim` when the arc names none).
+ */
+
+/**
+ * @typedef {object} DetailLayerArc
+ * @property {string} key - the layer's package key.
+ * @property {'root'|'sublayer'|'reference'|'payload'} kind - how it is reached.
+ * @property {string} from - the layer that named it ('' for the root).
+ * @property {string} fromPath - the prim that declared the arc, for references
+ *   and payloads.
+ * @property {string} asset - the arc's `@…@` body, for references and payloads.
+ * @property {string} prim - the arc's authored prim path, when it named one.
+ */
+
+/**
  * @typedef {object} PrimDetails
  * @property {string} path - the prim's absolute stage path.
  * @property {string} name - its display name (the last path component).
- * @property {string} type - its declared prins type (`Mesh`).
+ * @property {string} type - its declared prim type (`Mesh`).
  * @property {string} specifier - `def` / `over` / `class`.
  * @property {string} kind - the authored `kind`, '' when none.
  * @property {string[]} apiSchemas - every applied API schema.
  * @property {string[]} variantSets - variant sets the prim declares.
+ * @property {Record<string, string[]>} variantNames - set to declared variants,
+ *   when the layers spell them.
+ * @property {Record<string, string>} variantSelections - set to selected variant.
  * @property {string[]} inherits - authored inherits paths.
  * @property {string[]} specializes - authored specializes paths.
+ * @property {DetailArc[]} references - authored references, with resolution.
+ * @property {DetailArc[]} payloads - authored payloads, with resolution.
  * @property {string} doc - the authored `doc`, '' when none.
  * @property {Record<string, unknown>} customData - the authored custom data.
  * @property {DetailAttribute[]} attributes - every attribute, ordered for reading.
  * @property {DetailRelationship[]} relationships - every relationship and its targets.
  * @property {string[]} layers - the package keys of every layer that described it.
+ * @property {DetailLayerArc[]} layerArcs - how each of those layers is reached, in
+ *   the same order as `layers`.
+ * @property {{key: string, reason: string}[]} unreadableLayers - layers that were
+ *   present but whose declarations could not be decoded.
  * @property {boolean} present - whether the layers described this prim at all.
  */
 
@@ -595,24 +1051,52 @@ export async function readPrimDetails(sources, path, options = {}) {
   // Decode every layer once, then resolve the requested stage path against each
   // one's own authored paths: composition re-roots a referenced layer, so the
   // path the viewport names a prim by is not the path the layer wrote.
+  //
+  // A layer that cannot be decoded is named rather than dropped silently: "the
+  // crate could not be read back" and "no layer describes that prim" are
+  // different answers, and only the panel can state the first honestly.
   const layers = []
+  const unreadableLayers = []
   for (const entry of entries) {
     let decoded
     try {
-      decoded = decodeLayerBytes(entry.bytes, options.parseCrate)
+      decoded = decodeLayerBytes(entry.bytes, options.parseCrate, { withAttributes: true })
     } catch {
+      unreadableLayers.push({ key: entry.key, reason: 'the container could not be read' })
       continue
     }
-    if (decoded === undefined) continue
+    if (decoded === undefined) {
+      unreadableLayers.push({ key: entry.key, reason: 'the container could not be read' })
+      continue
+    }
+    if (typeof decoded.unreadable === 'string') {
+      unreadableLayers.push({ key: entry.key, reason: decoded.unreadable })
+      continue
+    }
     layers.push({ key: entry.key, prims: decoded.prims, meta: decoded.meta ?? {} })
   }
   const resolved = resolveAuthoredPath(layers, path)
-  const prim = { merged: undefined, layers: [], authored: path, attributes: new Map() }
+  const prim = {
+    merged: undefined,
+    layers: [],
+    layerArcs: [],
+    arcOrigins: new Map(),
+    authored: path,
+    attributes: new Map(),
+  }
   let oversizedPrim
-  for (const { entry, authored } of resolved) {
+  for (const { entry, authored, via } of resolved) {
     const found = entry.prims.get(authored)
     if (found === undefined) continue
     prim.layers.push(entry.key)
+    prim.layerArcs.push({
+      key: entry.key,
+      kind: typeof via?.kind === 'string' ? via.kind : 'root',
+      from: typeof via?.from === 'string' ? via.from : '',
+      fromPath: typeof via?.fromPath === 'string' ? via.fromPath : '',
+      asset: typeof via?.asset === 'string' ? via.asset : '',
+      prim: typeof via?.prim === 'string' ? via.prim : '',
+    })
     if (prim.merged === undefined) {
       prim.merged = clonePrim(found)
       prim.authored = authored
@@ -631,6 +1115,19 @@ export async function readPrimDetails(sources, path, options = {}) {
     for (const name of Object.keys(found.rels)) {
       if (!prim.attributes.has(name)) prim.attributes.set(name, entry.key)
     }
+    // Merging keeps the first layer's opinion for an arc, exactly as it does for
+    // an attribute; naming that layer is what keeps the panel's rows traceable.
+    for (const key of ['references', 'payload', 'inherits', 'specializes']) {
+      const value = found.meta[key]
+      if (Array.isArray(value) && value.length > 0 && prim.arcOrigins.has(key) === false) prim.arcOrigins.set(key, entry.key)
+    }
+    if (Array.isArray(found.meta.variantSets) && found.meta.variantSets.length > 0 && prim.arcOrigins.has('variantSets') === false) {
+      prim.arcOrigins.set('variantSets', entry.key)
+    }
+    if (found.meta.variants !== undefined && found.meta.variants !== null
+      && Object.keys(found.meta.variants).length > 0 && prim.arcOrigins.has('variants') === false) {
+      prim.arcOrigins.set('variants', entry.key)
+    }
     if (found.arraySizes !== undefined && Object.keys(found.arraySizes).length > 0) {
       oversizedPrim = { ...oversizedPrim, ...found.arraySizes }
     }
@@ -645,13 +1142,19 @@ export async function readPrimDetails(sources, path, options = {}) {
       kind: '',
       apiSchemas: [],
       variantSets: [],
+      variantNames: {},
+      variantSelections: {},
       inherits: [],
       specializes: [],
+      references: [],
+      payloads: [],
       doc: '',
       customData: {},
       attributes: [],
       relationships: [],
       layers: [],
+      layerArcs: [],
+      unreadableLayers,
       present: false,
     }
   }
@@ -679,6 +1182,32 @@ export async function readPrimDetails(sources, path, options = {}) {
     targets: merged.rels[name],
     layer: prim.attributes.get(name) ?? prim.layers[0],
   }))
+  // Resolve each authored arc against the layers this stage actually composed, so
+  // a row can say both where the arc points and whether that layer was read. An
+  // unresolved target is not a guess: it is exactly what the stage is missing.
+  const byKey = new Map(layers.map(layer => [layer.key, layer]))
+  const resolveArcs = (kind, list, origin) => {
+    if (!Array.isArray(list)) return []
+    return list.map((arc) => {
+      const asset = typeof arc?.asset === 'string' ? arc.asset : ''
+      const target = asset === '' ? undefined : layerForArc(byKey, origin, asset)
+      const defaultPrim = target !== undefined && typeof target.meta?.defaultPrim === 'string' ? target.meta.defaultPrim : ''
+      const arcPrim = typeof arc?.prim === 'string' ? arc.prim : ''
+      const targetPrim = arcPrim !== '' ? arcPrim : (defaultPrim === '' ? '' : '/' + defaultPrim)
+      return { kind, asset, prim: arcPrim, layer: origin, targetLayer: target?.key ?? '', targetPrim }
+    })
+  }
+  const arcOrigin = key => prim.arcOrigins.get(key) ?? prim.layers[0]
+  const variantSelections = merged.meta.variants !== null && typeof merged.meta.variants === 'object'
+    ? Object.fromEntries(Object.entries(merged.meta.variants).filter(([, value]) => typeof value === 'string' && value !== ''))
+    : {}
+  const variantNames = {}
+  if (merged.meta.variantNames !== null && typeof merged.meta.variantNames === 'object') {
+    for (const [set, names] of Object.entries(merged.meta.variantNames)) {
+      const kept = Array.isArray(names) ? names.filter(name => typeof name === 'string' && name !== '') : []
+      if (kept.length > 0) variantNames[set] = kept
+    }
+  }
   return {
     path,
     // The path the layer itself authored, which differs from the stage path
@@ -690,14 +1219,20 @@ export async function readPrimDetails(sources, path, options = {}) {
     specifier: merged.specifier,
     kind: typeof merged.meta.kind === 'string' ? merged.meta.kind : '',
     apiSchemas: [...merged.apiSchemas],
-    variantSets: [...merged.meta.variantSets],
+    variantSets: [...(merged.meta.variantSets ?? [])],
+    variantNames,
+    variantSelections,
     inherits: [...(merged.meta.inherits ?? [])],
     specializes: [...(merged.meta.specializes ?? [])],
+    references: resolveArcs('reference', merged.meta.references, arcOrigin('references')),
+    payloads: resolveArcs('payload', merged.meta.payload, arcOrigin('payload')),
     doc: typeof merged.meta.doc === 'string' ? merged.meta.doc : '',
     customData: merged.meta.customData ?? {},
     attributes,
     relationships,
     layers: [...prim.layers],
+    layerArcs: [...prim.layerArcs],
+    unreadableLayers,
     present: true,
   }
 }
@@ -731,18 +1266,20 @@ function resolveAuthoredPath(layers, path) {
   if (root === undefined) return out
   // A (layer, path-in-that-layer) pair, not a layer: one asset referenced twice is
   // the same layer reached at two places, and each place re-roots it differently.
+  // The `via` record is how the layer is reached, so the panel can name the arc a
+  // row came through instead of printing a flat list of files.
   const visited = new Set()
-  const queue = [{ layer: root, prefix: '', authored: path }]
+  const queue = [{ layer: root, prefix: '', authored: path, via: { kind: 'root' } }]
   while (queue.length > 0) {
     const current = queue.shift()
     const id = current.layer.key + '|' + current.authored
     if (visited.has(id) === true) continue
     visited.add(id)
-    out.push({ entry: current.layer, authored: current.authored })
+    out.push({ entry: current.layer, authored: current.authored, via: current.via })
     // A sublayer composes at the *same* path as the layer that lists it: it
     // re-roots nothing, so the very same authored path is asked of it.
     for (const sub of subLayersOf(current.layer, byKey)) {
-      queue.push({ layer: sub, prefix: current.prefix, authored: current.authored })
+      queue.push({ layer: sub, prefix: current.prefix, authored: current.authored, via: { kind: 'sublayer', from: current.layer.key } })
     }
     // A reference or a payload composes the referenced layer's prim *under* the
     // arc's own prim, so the rest of the composed path is looked for there.
@@ -763,7 +1300,15 @@ function resolveAuthoredPath(layers, path) {
           ? arc.prim
           : (typeof target.meta.defaultPrim === 'string' && target.meta.defaultPrim !== '' ? '/' + target.meta.defaultPrim : '')
         if (targetPrim === '') continue
-        queue.push({ layer: target, prefix: arcAuthoredPath, authored: targetPrim + rest })
+        // A reference may name the referenced layer's absolute root; the rest of
+        // the composed path then starts at that root rather than under it.
+        const authoredInTarget = targetPrim === '/' ? (rest === '' ? '/' : rest) : targetPrim + rest
+        queue.push({
+          layer: target,
+          prefix: arcAuthoredPath,
+          authored: authoredInTarget,
+          via: { kind: arc.kind, from: current.layer.key, fromPath: arcAuthoredPath, asset: arc.asset, prim: arc.prim },
+        })
       }
     }
   }
@@ -803,10 +1348,12 @@ function subLayersOf(layer, byKey) {
  */
 function compositionArcsOf(prim) {
   const arcs = []
-  for (const list of [prim.meta?.references, prim.meta?.payload]) {
+  for (const [kind, list] of [['reference', prim.meta?.references], ['payload', prim.meta?.payload]]) {
     if (!Array.isArray(list)) continue
     for (const entry of list) {
-      if (typeof entry?.asset === 'string' && entry.asset !== '') arcs.push(entry)
+      if (typeof entry?.asset === 'string' && entry.asset !== '') {
+        arcs.push({ kind, asset: entry.asset, prim: typeof entry.prim === 'string' ? entry.prim : undefined })
+      }
     }
   }
   return arcs
@@ -846,6 +1393,17 @@ function layerForArc(byKey, layerKey, asset) {
 
 /** A prim record this module may merge into without touching the layer's own. */
 function clonePrim(prim) {
+  const meta = { ...prim.meta, variantSets: [...prim.meta.variantSets] }
+  // The arcs are merged by mutating the target record, so their arrays and maps
+  // are copies: a merge must never write through into the layer it read.
+  if (Array.isArray(prim.meta.references)) meta.references = prim.meta.references.map(arc => ({ ...arc }))
+  if (Array.isArray(prim.meta.payload)) meta.payload = prim.meta.payload.map(arc => ({ ...arc }))
+  if (Array.isArray(prim.meta.inherits)) meta.inherits = [...prim.meta.inherits]
+  if (Array.isArray(prim.meta.specializes)) meta.specializes = [...prim.meta.specializes]
+  if (prim.meta.variants !== undefined && prim.meta.variants !== null) meta.variants = { ...prim.meta.variants }
+  if (prim.meta.variantNames !== undefined && prim.meta.variantNames !== null) {
+    meta.variantNames = Object.fromEntries(Object.entries(prim.meta.variantNames).map(([set, names]) => [set, [...names]]))
+  }
   return {
     ...prim,
     apiSchemas: [...prim.apiSchemas],
@@ -855,7 +1413,7 @@ function clonePrim(prim) {
     arraySizes: { ...prim.arraySizes },
     rels: { ...prim.rels },
     spans: { ...prim.spans },
-    meta: { ...prim.meta, variantSets: [...prim.meta.variantSets] },
+    meta,
   }
 }
 
@@ -865,15 +1423,54 @@ function clonePrim(prim) {
  * @param parseCrate - the crate parser class, when the caller has one.
  * @returns the prim map, or undefined for a container this reader cannot decode.
  */
-function decodeLayerBytes(bytes, parseCrate) {
+function decodeLayerBytes(bytes, parseCrate, options = {}) {
   if (isCrateLayer(bytes) === true) {
-    if (typeof parseCrate !== 'function') return undefined
-    return readCratePrims(bytes, parseCrate)
+    if (typeof parseCrate !== 'function') return { unreadable: 'crate layer: no crate parser is available in this context' }
+    const decoded = readCratePrims(bytes, parseCrate, options)
+    if (decoded === undefined) return { unreadable: 'crate layer: this container could not be decoded faithfully' }
+    return decoded
   }
-  if (isTextLayer(bytes) === false) return undefined
+  if (isTextLayer(bytes) === false) {
+    return {
+      unreadable: isPackageLayer(bytes) === true
+        ? 'usdz package: its layers live inside the archive'
+        : 'unrecognized container: neither an ASCII layer nor a crate',
+    }
+  }
   const text = new TextDecoder().decode(bytes)
-  const reader = new AsciiLayerReader(text, { keep: () => true, arrayHead: PREVIEW_ELEMENTS })
+  const withAttributes = options.withAttributes !== false
+  const reader = new AsciiLayerReader(text, {
+    keep: withAttributes ? () => true : () => false,
+    arrayHead: PREVIEW_ELEMENTS,
+  })
   return { prims: reader.read(), meta: reader.meta }
 }
 
-export { PREVIEW_ELEMENTS, LEADING_ATTRIBUTES, NAMESPACES, GROUP_ORDER, isCrateLayer, isTextLayer }
+/**
+ * Whether bytes are a zip package (a .usdz), by its leading signature.
+ * @param bytes - the layer's bytes.
+ * @returns whether this is a zip archive rather than a layer.
+ */
+function isPackageLayer(bytes) {
+  if (bytes === undefined || bytes.byteLength < 4) return false
+  if (bytes[0] !== 0x50 || bytes[1] !== 0x4B) return false
+  return (bytes[2] === 0x03 && bytes[3] === 0x04)
+    || (bytes[2] === 0x05 && bytes[3] === 0x06)
+    || (bytes[2] === 0x07 && bytes[3] === 0x08)
+}
+
+export {
+  PREVIEW_ELEMENTS,
+  LEADING_ATTRIBUTES,
+  NAMESPACES,
+  GROUP_ORDER,
+  isCrateLayer,
+  isTextLayer,
+  isPackageLayer,
+  layerBytesOf,
+  decodeLayerBytes,
+  layerForArc,
+  joinPath,
+  subLayersOf,
+  compositionArcsOf,
+}

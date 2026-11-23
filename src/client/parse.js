@@ -22,7 +22,10 @@ import { USDAParser } from 'three/examples/jsm/loaders/usd/USDAParser.js'
 import { USDCParser } from 'three/examples/jsm/loaders/usd/USDCParser.js'
 import { USDComposer } from 'three/examples/jsm/loaders/usd/USDComposer.js'
 import { readArticulation } from './articulation.js'
-import { readPrimDetails } from './details.js'
+import { readStageComposition } from './composition.js'
+import { decodeLayerBytes, readPrimDetails } from './details.js'
+import { previewLayer } from './text-view.js'
+import { renderUsdaLayer } from './usda-text.js'
 import { layerBasePath, normalizePosix, referenceKey } from './usd.js'
 
 /** `PXR-USDC`, the binary crate header. */
@@ -48,6 +51,15 @@ const ASSET_REFERENCE = /@([^@\n]+)@/g
 const FIELD_DEPTH = 4
 
 const textDecoder = new TextDecoder()
+
+/**
+ * Largest crate this preview reconstructs text for.
+ *
+ * A crate has no authored text; the reconstruction decodes its records, and the
+ * panel can show only a small part of the result. Past this size the binary state
+ * is the honest answer — the view is a preview, not an export.
+ */
+const MAX_RECONSTRUCT_BYTES = 16 * 1024 * 1024
 
 /** Default triangle count under which the CPU vertex arrays are retained. */
 const DEFAULT_PICK_TRIANGLE_BUDGET = 2000000
@@ -517,6 +529,75 @@ function retainPickableAttributes(object) {
 export async function describePrim(parsed, path) {
   if (parsed === null || parsed === undefined || parsed.sources === undefined) return undefined
   return readPrimDetails(parsed.sources, path, { parseCrate: USDCParser })
+}
+
+/**
+ * Read the stage's layer composition: every layer it composed and the arcs that
+ * placed it there.
+ *
+ * A stage the three fallback composed has no layer map (it parsed and threw the
+ * data away), and the panel says so rather than guessing from the prim paths.
+ * @param parsed - the result of {@link assemble}.
+ * @param rootKey - the key of the file the user opened, so the tree starts there.
+ * @returns the composition, or undefined when the stage kept no layer bytes.
+ */
+export async function describeComposition(parsed, rootKey) {
+  if (parsed === null || parsed === undefined || parsed.sources === undefined) return undefined
+  return readStageComposition(parsed.sources, { rootKey, parseCrate: USDCParser })
+}
+
+/**
+ * The text view of one layer.
+ *
+ * An ASCII layer is its own authored text, which is the honest answer: the file
+ * is the source. A crate has no text, so it is reconstructed from the records the
+ * details reader decodes — labelled as a reconstruction, because presenting a
+ * third opinion as the authored source is exactly what this plugin avoids. A
+ * container the reader cannot decode keeps its binary state and its reason.
+ * @param bytes - the layer's complete bytes.
+ * @returns a previewLayer-shaped preview: authored text, reconstructed text, or
+ *   the binary/package state that says why there is none.
+ */
+export function describeLayerText(bytes) {
+  const preview = previewLayer(bytes)
+  if (preview.kind !== 'binary' || preview.container !== 'crate') return preview
+  // Reconstruction materialises every decoded record, so a very large crate is
+  // left in its binary state rather than turned into a string on a click: the
+  // text would be far past the panel's display bound anyway, and decoding it is
+  // the one cost this lazily-read mode must not pay upfront.
+  if (bytes !== undefined && bytes !== null && bytes.byteLength > MAX_RECONSTRUCT_BYTES) return preview
+  let decoded
+  try {
+    decoded = decodeLayerBytes(bytes, USDCParser)
+  } catch {
+    return preview
+  }
+  if (decoded === undefined || decoded.unreadable !== undefined) return preview
+  let text
+  try {
+    text = renderUsdaLayer({ meta: decoded.meta, prims: decoded.prims }, {
+      headerComment: [
+        'Reconstructed from a binary crate layer by the DSH USD preview.',
+        'Values are as decoded by the preview, not the authored source.',
+        'Long arrays are abbreviated to their first elements.',
+      ],
+      maxChars: 400000,
+    })
+  } catch {
+    return preview
+  }
+  const lineCount = text === '' ? 0 : text.split('\n').length
+  return {
+    ...preview,
+    kind: 'text',
+    container: 'crate',
+    reconstructed: true,
+    text,
+    lineCount,
+    truncated: false,
+    omittedLines: 0,
+    longLinesTrimmed: 0,
+  }
 }
 
 /**

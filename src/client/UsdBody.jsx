@@ -13,12 +13,21 @@
  * declines to claim the shared scrollport (`scrollportRef`): an orbit canvas has
  * nothing to scroll, and claiming it would suppress the document body's own
  * scrollbar binding.
+ *
+ * Two modes read the same bytes instead of the composed graph. **Text** shows the
+ * layers' own USDA source — the authored text for an ASCII layer, a labelled
+ * reconstruction for a crate — because "what does the file say" is a different
+ * question from "what is drawn". **Composition** shows the layer tree and every
+ * arc that placed a layer in it. Both read lazily and only from the bytes the
+ * assembly kept, so neither can turn a large stage into a stalled tab.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TreeChevron, TreeFolder, TreePrim } from './artwork.jsx'
+import { StageCompositionPanel } from './CompositionPanel.jsx'
 import { PrimDetailsPanel } from './DetailsPanel.jsx'
 import { createArticulationController } from './kinematics.js'
-import { assemble, describePrim, disposeObject } from './parse.js'
+import { assemble, describeComposition, describeLayerText, describePrim, disposeObject } from './parse.js'
+import { UsdTextPanel } from './TextPanel.jsx'
 import {
   allFolderPaths, ancestorsOf, buildPrimTree, countPrimNodes, filterPrimTree, flattenPrimTree,
 } from './prim-tree.js'
@@ -41,6 +50,26 @@ const SHELL = {
 }
 
 const CANVAS = { position: 'absolute', inset: 0 }
+
+/**
+ * The text view replaces the viewport completely, toolbar included: the reader is
+ * looking at the file, and a row of viewport controls over the code would both
+ * steal the top-right corner the panel's own close button needs and offer
+ * controls that do nothing while reading. Leaving the mode is the panel's × or
+ * Escape, the two affordances the other panels use.
+ */
+const TEXT_VIEW = {
+  position: 'absolute',
+  inset: 0,
+  zIndex: 6,
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden',
+  background: BASE,
+  color: LABEL,
+  fontFamily: FONT,
+  fontSize: 11,
+}
 
 const TOOLBAR = {
   position: 'absolute',
@@ -201,6 +230,25 @@ function collectPrimPaths(object) {
   return [...paths].sort((left, right) => left.localeCompare(right))
 }
 
+/**
+ * The bytes of one layer source, whatever shape the assembly kept it in.
+ *
+ * The engine keeps Blobs, a dropped file is a File (a Blob), an address-opened
+ * stage hands over a Uint8Array, and a test hands over bytes directly. One
+ * reader for all four keeps the text panel from needing to know which door the
+ * stage came through.
+ * @param value - one layer source from the assembly.
+ * @returns its bytes, or undefined when the value carries none.
+ */
+async function toLayerBytes(value) {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'string') return new TextEncoder().encode(value)
+  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (ArrayBuffer.isView(value) === true) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+  if (typeof value.arrayBuffer === 'function') return new Uint8Array(await value.arrayBuffer())
+  return undefined
+}
+
 const WARNINGS = {
   position: 'absolute',
   right: 10,
@@ -277,6 +325,21 @@ export function UsdBody(props) {
   const t = props.t
   const data = content !== undefined && content.kind === 'bytes' ? content.data : undefined
   const name = usdFileName(resourceAddress)
+  // The key the assembly composed the opened file under. References resolve
+  // relative to it, and both read-back panels (text and composition) start their
+  // walk there instead of at whatever the layer map happens to list first.
+  const openedKey = useMemo(() => {
+    if (droppedRootKey !== undefined && droppedRootKey !== null) return String(droppedRootKey)
+    if (remoteStage !== undefined) return String(remoteStage.rootKey)
+    if (droppedFiles !== undefined && typeof droppedFiles.keys === 'function') {
+      const first = [...droppedFiles.keys()][0]
+      if (first !== undefined) return String(first)
+    }
+    const reference = parseFileReference(resourceAddress)
+    if (reference !== undefined) return reference.path
+    const absolute = absoluteFilePath(resourceAddress)
+    return absolute === undefined ? undefined : absolute
+  }, [droppedRootKey, remoteStage, droppedFiles, resourceAddress])
   const shellRef = useRef(null)
   const containerRef = useRef(null)
   const viewRef = useRef(null)
@@ -310,6 +373,11 @@ export function UsdBody(props) {
   // the file declare about this prim" — so it is its own panel with its own state
   // rather than more rows in a list of names.
   const [detailsOpen, setDetailsOpen] = useState(false)
+  // The text view and the composition panel read the same layer bytes instead of
+  // the composed graph; each is its own mode, toggled from the toolbar.
+  const [textOpen, setTextOpen] = useState(false)
+  const [textLayerKey, setTextLayerKey] = useState(null)
+  const [compositionOpen, setCompositionOpen] = useState(false)
 
   /**
    * Dictionary lookup with a literal fallback: copy must never be the reason a
@@ -531,6 +599,81 @@ export function UsdBody(props) {
     () => (parsed === null ? undefined : path => describePrim(parsed, path)),
     [parsed],
   )
+  // Every layer byte the read-back modes may show: the opened file's bytes first,
+  // then the engine's package map (which already holds every referenced layer),
+  // then the dropped files. Aliases of one blob share an object, so identity is
+  // what keeps one row per layer.
+  const layerSources = useMemo(() => {
+    const entries = []
+    const seen = new Set()
+    const seenKeys = new Set()
+    const add = (key, value) => {
+      if (key === undefined || key === null || value === undefined || value === null) return
+      const name = String(key)
+      // Two spellings of one blob are one layer; so are the root bytes and the
+      // same root registered in the engine's package map. A key names a layer, so
+      // the first value under a key wins.
+      if (seen.has(value) === true || seenKeys.has(name) === true) return
+      seen.add(value)
+      seenKeys.add(name)
+      entries.push({ key: name, value })
+    }
+    // The engine's package map is the fullest record when it exists: it holds the
+    // root bytes under the opened key *and* every layer the stage read.
+    if (parsed !== null && parsed.sources instanceof Map) {
+      for (const [key, value] of parsed.sources) add(key, value)
+    }
+    if (droppedFiles instanceof Map) {
+      for (const [key, value] of droppedFiles) add(key, value)
+    }
+    if (openedKey !== undefined && data !== undefined) add(openedKey, data)
+    if (remoteStage !== undefined && remoteStage.rootBytes !== undefined) add(remoteStage.rootKey, remoteStage.rootBytes)
+    return entries
+  }, [parsed, droppedFiles, data, openedKey, remoteStage])
+
+  // The text view's rows: the opened file first (a reader opens the layer they
+  // chose), then the composed layers in key order. Bytes are read when a layer is
+  // picked, never for the whole stage up front — a solved robot's geometry layer
+  // is tens of megabytes and no reader opened the text view for it.
+  const textLayers = useMemo(() => {
+    const layers = []
+    const seen = new Set()
+    const add = (entry, role) => {
+      if (entry === undefined || seen.has(entry.value) === true) return
+      seen.add(entry.value)
+      layers.push({
+        key: entry.key,
+        name: usdFileName(entry.key),
+        role,
+        load: () => toLayerBytes(entry.value),
+      })
+    }
+    const root = layerSources.find(entry => entry.key === openedKey)
+    add(root ?? layerSources[0], 'root')
+    for (const entry of layerSources) {
+      if (entry === root || entry === layerSources[0]) continue
+      add(entry, 'layer')
+    }
+    return layers
+  }, [layerSources, openedKey])
+
+  // A text layer named by a previous assembly may not exist in this one; the mode
+  // always opens on a layer that is there.
+  useEffect(() => {
+    if (textLayers.length === 0) {
+      if (textLayerKey !== null) setTextLayerKey(null)
+      return
+    }
+    if (textLayerKey !== null && textLayers.some(layer => layer.key === textLayerKey)) return
+    setTextLayerKey(textLayers[0].key)
+  }, [textLayers, textLayerKey])
+
+  // The composition panel's reader is a fact about the assembly, not the click:
+  // memoizing it keeps the panel from re-walking every layer on each parent draw.
+  const compositionReader = useMemo(
+    () => (parsed === null ? undefined : () => describeComposition(parsed, openedKey)),
+    [parsed, openedKey],
+  )
   // Detail hint keys mirror usdview's pane names so a USD reader's vocabulary
   // works here: Type / Kind / Applied schemas / Attributes / Relationships. The
   // two panels sit on opposite edges, so opening one does not hide the other —
@@ -570,11 +713,21 @@ export function UsdBody(props) {
         && target !== document.body && target !== document.documentElement
         && shell.contains(target) === false
       if (focusElsewhere === true) return
+      // A mode that took over the viewport gets the first Escape: it is the bigger
+      // thing on screen, and a second press still reaches the selection.
+      if (textOpen === true) {
+        setTextOpen(false)
+        return
+      }
+      if (compositionOpen === true) {
+        setCompositionOpen(false)
+        return
+      }
       clearSelection()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [clearSelection])
+  }, [clearSelection, textOpen, compositionOpen])
 
   // The graph is released with its viewport, whether or not one was ever built.
   useEffect(() => () => {
@@ -733,13 +886,39 @@ export function UsdBody(props) {
       data-usd-colliders={parts?.hasColliders === true ? '1' : '0'}
       data-usd-pickable={parsed?.pickable === true ? '1' : '0'}
       data-usd-selected={picked ?? ''}
+      data-usd-text-mode={textOpen ? '1' : '0'}
+      data-usd-composition-open={compositionOpen ? '1' : '0'}
+      data-usd-layers={textLayers.length}
     >
       <div ref={containerRef} style={CANVAS} data-usd-preview-stage />
+      {textOpen && (
+        <div style={TEXT_VIEW} data-usd-text-view>
+          <UsdTextPanel
+            layers={textLayers}
+            activeKey={textLayerKey}
+            onSelect={setTextLayerKey}
+            onClose={() => setTextOpen(false)}
+            describeLayer={describeLayerText}
+            t={t}
+          />
+        </div>
+      )}
       {failure !== null && (
         <div style={CENTERED} role="alert">
           <div>
             <div style={{ color: ERROR, fontWeight: 600 }}>{label('failed', 'This USD file could not be parsed.')}</div>
             <div style={{ marginTop: 6, color: LABEL_DIM, wordBreak: 'break-word' }}>{failure}</div>
+            <div style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                style={buttonStyle(textOpen)}
+                data-usd-text-toggle
+                title={label('textHint', "Show the layers' own USDA text")}
+                onClick={() => setTextOpen(value => !value)}
+              >
+                {label('textMode', 'Text')}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -827,8 +1006,26 @@ export function UsdBody(props) {
             >
               {label('details', 'Details')}
             </button>
+            <button
+              type="button"
+              style={buttonStyle(textOpen)}
+              data-usd-text-toggle
+              title={label('textHint', "Show the layers' own USDA text")}
+              onClick={() => setTextOpen(value => !value)}
+            >
+              {label('textMode', 'Text')}
+            </button>
+            <button
+              type="button"
+              style={buttonStyle(compositionOpen)}
+              data-usd-composition-toggle
+              title={label('compositionHint', 'Show the layer stack and the arcs that composed it')}
+              onClick={() => setCompositionOpen(value => !value)}
+            >
+              {label('composition', 'Composition')}
+            </button>
           </div>
-          {!primsOpen && <div style={HINT}>
+          {!primsOpen && !textOpen && <div style={HINT}>
             {label('help', 'Drag to orbit · wheel to zoom · right-drag to pan')}
             {partsHint === undefined ? '' : <div style={{ marginTop: 2 }} data-usd-parts-hint>{partsHint}</div>}
             {picked === null ? '' : (
@@ -864,7 +1061,7 @@ export function UsdBody(props) {
               </div>
             )}
           </div>}
-          {primsOpen && (
+          {!textOpen && primsOpen && (
             <div style={PRIMS} data-usd-prims>
               <div style={PRIM_HEAD}>
                 <span style={{ flex: '1 1 auto' }}>
@@ -967,7 +1164,7 @@ export function UsdBody(props) {
               </div>
             </div>
           )}
-          {detailsOpen && (
+          {!textOpen && detailsOpen && (
             <PrimDetailsPanel
               path={picked}
               read={primReader}
@@ -975,8 +1172,15 @@ export function UsdBody(props) {
               t={t}
             />
           )}
-          {stats !== undefined && <div style={STATS} data-usd-stats>{stats}</div>}
-          {engineWarnings.length > 0 && (
+          {compositionOpen && (
+            <StageCompositionPanel
+              read={compositionReader}
+              onClose={() => setCompositionOpen(false)}
+              t={t}
+            />
+          )}
+          {!textOpen && stats !== undefined && <div style={STATS} data-usd-stats>{stats}</div>}
+          {!textOpen && engineWarnings.length > 0 && (
             <div style={WARNINGS} data-usd-warnings>
               {engineWarnings.slice(0, 40).map((warning, index) => (
                 <div key={`${warning.code}-${index}`} style={{ marginTop: index === 0 ? 0 : 4 }}>

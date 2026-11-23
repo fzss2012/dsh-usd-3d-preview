@@ -325,4 +325,127 @@ def Xform "X"
   assert.equal(unreadable.present, false, 'a layer this reader cannot decode contributes nothing')
 }
 
-process.stdout.write('details.test.mjs  OK  (typed attributes, schemas, relationships, ASCII/crate parity, array summaries)\n')
+// ── complete composition arcs: references, payloads, inherits, specializes,
+//    variant sets, and the layer each arc came from ───────────────────────────
+{
+  const root = await fixture('arcs/full.usda')
+  const body = await fixture('arcs/ref/body.usda')
+  const other = await fixture('arcs/ref/other.usda')
+  const base = await fixture('arcs/sub/base.usda')
+  const heavy = await fixture('arcs/payload/heavy.usda')
+  const sources = new Map([
+    ['arcs/full.usda', root],
+    ['arcs/ref/body.usda', body],
+    ['arcs/ref/other.usda', other],
+    ['arcs/sub/base.usda', base],
+    ['arcs/payload/heavy.usda', heavy],
+  ])
+  const details = await readPrimDetails(sources, '/root', { parseCrate: USDCParser })
+  assert.equal(details.present, true)
+
+  // References: one names no prim (it composes the layer's defaultPrim) and one
+  // names </Other>; both name the layer that actually held the target.
+  assert.deepEqual(
+    details.references.map(arc => [arc.kind, arc.asset, arc.prim, arc.targetLayer, arc.targetPrim]),
+    [
+      ['reference', './ref/body.usda', '', 'arcs/ref/body.usda', '/root'],
+      ['reference', './ref/other.usda', '/Other', 'arcs/ref/other.usda', '/Other'],
+    ],
+    'every reference, its composed prim and its resolved layer must be reported',
+  )
+  assert.deepEqual(
+    details.payloads.map(arc => [arc.kind, arc.asset, arc.prim, arc.targetLayer, arc.targetPrim]),
+    [['payload', './payload/heavy.usda', '/Heavy', 'arcs/payload/heavy.usda', '/Heavy']],
+    'a payload is an arc too, with its own list',
+  )
+  assert.equal(details.references[0].layer, 'arcs/full.usda', 'the layer that authored an arc is named')
+  assert.deepEqual(details.inherits, ['/Base'])
+  assert.deepEqual(details.specializes, ['/Special'])
+
+  // Variant sets carry both their declared variants and the authored selection —
+  // the two things a reader needs to know which variant the stage is showing.
+  assert.deepEqual(details.variantSets, ['modeling', 'look'])
+  assert.deepEqual(details.variantNames, { modeling: ['simple', 'fancy'], look: ['red', 'blue'] })
+  assert.deepEqual(details.variantSelections, { modeling: 'simple', look: 'red' })
+
+  // Every describing layer is named with the arc that reached it: the root, the
+  // reference target, the other reference target and the payload target all
+  // describe this prim through different arcs.
+  const arcsByKind = details.layerArcs.map(arc => [arc.key, arc.kind])
+  assert.deepEqual(arcsByKind, [
+    ['arcs/full.usda', 'root'],
+    ['arcs/ref/body.usda', 'reference'],
+    ['arcs/ref/other.usda', 'reference'],
+    ['arcs/payload/heavy.usda', 'payload'],
+  ], 'a layer list without provenance cannot answer which arc placed a layer: ' + JSON.stringify(arcsByKind))
+  const referenceArc = details.layerArcs.find(arc => arc.kind === 'reference')
+  assert.equal(referenceArc.from, 'arcs/full.usda')
+  assert.equal(referenceArc.fromPath, '/root')
+  assert.equal(referenceArc.asset, './ref/body.usda')
+
+  // A prim inside the referenced layer is found under its composed path, and its
+  // describing layer says so through the reference arc.
+  const unitBody = await readPrimDetails(sources, '/root/unit/body', { parseCrate: USDCParser })
+  assert.equal(unitBody.present, true, 'a prim under a reference is found by its composed path')
+  assert.deepEqual(unitBody.layers, ['arcs/ref/body.usda'])
+  assert.deepEqual(unitBody.layerArcs.map(arc => [arc.kind, arc.fromPath]), [['reference', '/root/unit']])
+}
+
+// ── a crate declares the same arcs, decoded from the binary tables ─────────
+{
+  const crateFull = await fixture('arcs/full.usdc')
+  const asciiFull = await fixture('arcs/full.usda')
+  const sources = new Map([
+    ['arcs/full.usdc', crateFull],
+    ['arcs/ref/body.usda', await fixture('arcs/ref/body.usda')],
+    ['arcs/ref/other.usda', await fixture('arcs/ref/other.usda')],
+    ['arcs/sub/base.usda', await fixture('arcs/sub/base.usda')],
+    ['arcs/payload/heavy.usda', await fixture('arcs/payload/heavy.usda')],
+  ])
+  const fromCrate = await readPrimDetails(sources, '/root', { parseCrate: USDCParser })
+  assert.equal(fromCrate.present, true)
+  assert.deepEqual(
+    fromCrate.references.map(arc => [arc.asset, arc.prim, arc.targetLayer]),
+    [
+      ['./ref/body.usda', '', 'arcs/ref/body.usda'],
+      ['./ref/other.usda', '/Other', 'arcs/ref/other.usda'],
+    ],
+    'the reference list-op three skips must be decoded from the crate',
+  )
+  assert.deepEqual(fromCrate.payloads.map(arc => [arc.asset, arc.prim]), [['./payload/heavy.usda', '/Heavy']])
+  assert.deepEqual(fromCrate.inherits, ['/Base'], 'the crate field inheritPaths is spelled inherits to a reader')
+  assert.deepEqual(fromCrate.specializes, ['/Special'])
+  assert.deepEqual(fromCrate.variantSets, ['modeling', 'look'], 'variantSetNames is a string list-op')
+  assert.deepEqual(fromCrate.variantSelections, { modeling: 'simple', look: 'red' }, 'the variant selection map survives')
+  assert.deepEqual(fromCrate.variantNames, {}, 'a crate names its sets but this fixture declares no variant specs to enumerate')
+
+  // The same stage in the two containers answers the same arcs.
+  const fromAscii = await readPrimDetails(new Map([...sources].map(([key, value]) => [key.replace('full.usdc', 'full.usda'), value])), '/root', { parseCrate: USDCParser })
+  assert.deepEqual(fromCrate.references.map(arc => [arc.asset, arc.prim, arc.targetLayer]), fromAscii.references.map(arc => [arc.asset, arc.prim, arc.targetLayer]))
+  assert.deepEqual(fromCrate.payloads.map(arc => arc.asset), fromAscii.payloads.map(arc => arc.asset))
+  assert.deepEqual(fromCrate.inherits, fromAscii.inherits)
+  assert.deepEqual(fromCrate.specializes, fromAscii.specializes)
+
+  // The crate's inlined double3 must read as the authored vector, not as its raw
+  // 32-bit payload — the value the details panel and the text view both show.
+  const unit = await readPrimDetails(sources, '/root/unit', { parseCrate: USDCParser })
+  const translate = unit.attributes.find(entry => entry.name === 'xformOp:translate')
+  assert.ok(translate !== undefined)
+  assert.equal(translate.value, '[3, 0, 0]', 'an inlined crate vector is decoded to its components')
+
+  // A layer the reader cannot decode is reported as such, not silently skipped.
+  const packageOnly = await readPrimDetails(new Map([['sample.usdz', await fixture('sample.usdz')]]), '/root')
+  assert.equal(packageOnly.present, false)
+  assert.equal(packageOnly.unreadableLayers.length, 1, 'the package itself is the unreadable layer')
+  assert.match(packageOnly.unreadableLayers[0].reason, /usdz package/)
+}
+
+// ── an authored arc the stage never composed is stated, not invented ───────
+{
+  const orphan = await readPrimDetails(new Map([['arcs/full.usda', await fixture('arcs/full.usda')]]), '/root')
+  assert.equal(orphan.references[0].targetLayer, '', 'a reference to a layer outside the stage resolves to nothing')
+  assert.equal(orphan.references[1].targetPrim, '/Other', 'the authored prim path is still reported')
+  assert.equal(orphan.payloads[0].targetLayer, '')
+}
+
+process.stdout.write('details.test.mjs  OK  (typed attributes, schemas, relationships, ASCII/crate parity, array summaries, complete composition arcs)\n')

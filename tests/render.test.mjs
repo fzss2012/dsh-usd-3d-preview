@@ -120,7 +120,7 @@ const hostContext = {
   },
 }
 hostHalf.apply(hostContext, undefined)
-assert.equal(hostRoutes.size, 5, 'the host half registered the asset, health, list, search and update routes')
+assert.equal(hostRoutes.size, 6, 'the host half registered the asset, health, list, search, update and connection routes')
 
 /** Files to draw, and the geometry each must report. */
 const CASES = [
@@ -587,6 +587,59 @@ try {
       assert.equal(await page.locator('[data-usd-details]').count(), 0, `${path}: the panel's × did not close it`)
 
       caseShot.prims = { count: primCount, picked, selection: selectedPath, cleared: cleared.changed }
+    }
+
+    // ── text mode: the layer's own USDA text, not the drawn graph ────────────
+    // The button is in the toolbar; what it opens is read from the layer bytes
+    // rather than from the assembled graph, so a crate's reconstruction and an
+    // ASCII layer's authored text are the two cases this pins.
+    if (prims === true) {
+      await page.locator('[data-usd-text-toggle]').click()
+      const textView = page.locator('[data-usd-text]')
+      await textView.waitFor({ timeout: 15_000 })
+      await page.waitForFunction(() => {
+        const node = document.querySelector('[data-usd-text]')
+        return node !== null && (node.getAttribute('data-usd-text-kind') ?? '') !== ''
+      }, undefined, { timeout: 20_000 })
+      const textKind = await textView.getAttribute('data-usd-text-kind')
+      assert.equal(textKind, 'text', `${path}: the text mode must render text, got "${textKind}"`)
+      const textRows = await page.locator('[data-usd-text-line]').count()
+      assert.ok(textRows > 0, `${path}: the text mode rendered no lines`)
+      const textBody = await textView.innerText()
+      assert.ok(textBody.includes('#usda 1.0'), `${path}: the USDA header is missing from the text view\n${textBody.slice(0, 300)}`)
+      const textShot = join(artifacts, `${path.replaceAll('/', '_')}-text.png`)
+      await page.screenshot({ path: textShot })
+      caseShot.text = { kind: textKind, rows: textRows, shot: textShot }
+      // The text view covers the toolbar by design, so its own × is the way back.
+      await page.locator('[data-usd-text-close]').click()
+      await page.waitForTimeout(250)
+      assert.equal(await page.locator('[data-usd-text]').count(), 0, `${path}: the text panel's × did not close the text view`)
+
+      // ── composition: the layer stack and the arcs that composed it ────────
+      const engine = await page.locator('[data-usd-preview]').getAttribute('data-usd-engine')
+      await page.locator('[data-usd-composition-toggle]').click()
+      const composition = page.locator('[data-usd-composition]')
+      await composition.waitFor({ timeout: 15_000 })
+      await page.waitForTimeout(600)
+      const compositionText = await composition.innerText()
+      const compositionNodes = await page.locator('[data-usd-composition-node]').count()
+      if (engine === 'wasm') {
+        assert.ok(compositionNodes >= 1, `${path}: the composition panel listed no layers`)
+        assert.match(compositionText, /root layer/, `${path}: the composition panel does not name the root layer\n${compositionText.slice(0, 300)}`)
+        if (path.startsWith('arcs/')) {
+          assert.ok(compositionNodes >= 3, `${path}: expected root + sublayer + reference nodes, got ${compositionNodes}\n${compositionText.slice(0, 400)}`)
+          assert.match(compositionText, /sublayer/, `${path}: the sublayer arc is missing from the panel`)
+          assert.match(compositionText, /reference/, `${path}: the reference arc is missing from the panel`)
+        }
+      } else {
+        assert.match(compositionText, /cannot be read back/i, `${path}: a fallback-composed stage must say why the composition is unavailable`)
+      }
+      const compositionShot = join(artifacts, `${path.replaceAll('/', '_')}-composition.png`)
+      await page.screenshot({ path: compositionShot })
+      caseShot.composition = { nodes: compositionNodes, shot: compositionShot }
+      await page.locator('[data-usd-composition-close]').click()
+      assert.equal(await page.locator('[data-usd-composition]').count(), 0, `${path}: the composition panel's × did not close it`)
+      assert.deepEqual(consoleErrors, [], `${path}: the read-back modes threw`)
     }
     results.push(caseShot)
     await page.close()

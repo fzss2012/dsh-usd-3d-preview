@@ -49,6 +49,14 @@ async function withEnvironment(values, callback) {
   }
 }
 
+// The saved-connection route reads `<DSH_HOME>/usd-3d-preview/object-store.json`
+// at request time, so the suite pins DSH_HOME at an empty temporary home for its
+// whole run: a developer who saved a connection from the sidebar must not change
+// what these assertions see.
+const suiteHome = await mkdtemp(join(tmpdir(), 'dsh-usd-suite-home-'))
+const savedSuiteHome = process.env.DSH_HOME
+process.env.DSH_HOME = suiteHome
+
 // ── environment configuration ───────────────────────────────────────────────
 
 await withEnvironment({}, async () => {
@@ -227,16 +235,20 @@ async function mountRoute({ tag, home }) {
     if (savedHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = savedHome
   }
-  assert.equal(routes.size, 5, 'the host half registered the asset, health, list, search and update routes')
+  assert.equal(routes.size, 6, 'the host half registered the asset, health, list, search, update and connection routes')
   assert.ok(routes.has('/api/usd-preview/asset'), 'the asset route lives on the /api trust-fenced channel')
   assert.ok(routes.has('/api/usd-preview/health'), 'the health route lives on the /api trust-fenced channel')
   assert.ok(routes.has('/api/usd-preview/list'), 'the listing route lives on the /api trust-fenced channel')
   assert.ok(routes.has('/api/usd-preview/search'), 'the search route lives on the /api trust-fenced channel')
   assert.ok(routes.has('/api/usd-preview/update'), 'the update route lives on the /api trust-fenced channel')
+  assert.ok(routes.has('/api/usd-preview/objstore/config'), 'the saved-connection route lives on the /api trust-fenced channel')
   const updateRoute = routes.get('/api/usd-preview/update')
   assert.deepEqual(updateRoute.methods, ['GET', 'POST'], 'the update route reads status and takes explicit actions')
+  assert.deepEqual(routes.get('/api/usd-preview/objstore/config').methods, ['GET', 'POST'],
+    'the connection route reads state and takes explicit actions')
+  const writable = new Set(['/api/usd-preview/update', '/api/usd-preview/objstore/config'])
   for (const [path, route] of routes) {
-    if (path !== '/api/usd-preview/update') assert.deepEqual(route.methods, ['GET'], 'the asset routes are read-only')
+    if (!writable.has(path)) assert.deepEqual(route.methods, ['GET'], 'the asset routes are read-only')
     assert.equal(route.requestBody, 'buffered', 'the routes buffer no request body')
     assert.equal(typeof route.fetch, 'function', 'the route is a Fetch handler')
   }
@@ -458,5 +470,9 @@ stubFetch(() => new Response(searchXml, { status: 200 }))
 assert.equal(objectUrl({ ...library, endpoint: 'https://s3.example.com' }, 'a b/c.usda'),
   'https://s3.example.com/asset/a%20b/c.usda', 'the public URL encodes each key segment')
 globalThis.fetch = realFetch
+
+if (savedSuiteHome === undefined) delete process.env.DSH_HOME
+else process.env.DSH_HOME = savedSuiteHome
+await rm(suiteHome, { recursive: true, force: true })
 
 say('s3.test.mjs  OK')

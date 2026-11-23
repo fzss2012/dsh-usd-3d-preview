@@ -161,6 +161,111 @@ export function hostLibrary() {
   return basePromise
 }
 
+/** Host route that reads and writes the connection saved from the sidebar. */
+const HOST_CONFIG = '/api/usd-preview/objstore/config'
+
+/**
+ * Forget every cached answer, so the page picks up a connection it just saved.
+ *
+ * The library probe is memoized for the page lifetime and the listing caches for
+ * ten seconds; without this reset the page would keep answering from the backend
+ * it had before the save.
+ * @returns undefined.
+ */
+export function resetObjectStoreCaches() {
+  basePromise = undefined
+  listCache.clear()
+  searchCache.clear()
+}
+
+/**
+ * Read the connection the host has stored, and which backend it is using.
+ *
+ * `undefined` means this composition has no host route at all (no Connection
+ * service), which is the same answer as "cannot persist": the page then keeps a
+ * browser-direct connection instead. `config: null` means the route answered
+ * and nothing is saved.
+ * @returns `{ config, source }`, or undefined when the route is absent.
+ */
+export async function loadObjectStoreConfig() {
+  let response
+  try {
+    response = await fetch(HOST_CONFIG)
+  } catch {
+    return undefined
+  }
+  if (response.status === 404 || response.status === 405 || response.status === 501) return undefined
+  if (!response.ok) return undefined
+  const body = await response.json().catch(() => undefined)
+  if (body === null || body === undefined || body.ok !== true) return undefined
+  return {
+    config: body.config === null || body.config === undefined ? null : body.config,
+    source: typeof body.source === 'string' ? body.source : null,
+  }
+}
+
+/**
+ * Persist one connection through the host half.
+ *
+ * The host validates it, verifies it with a real listing and only then writes,
+ * so a returned config is one that could list the bucket. A failure throws an
+ * Error whose message is stable ('objstore-config-invalid',
+ * 'objstore-config-environment', 'objstore-config-unverified',
+ * 'objstore-config-unsupported'); the route's own reason is on `error.reason`.
+ * @param fields - endpoint, bucket, region, rootPrefix, accessKey and secretKey.
+ * @returns `{ config, source }` — the stored, non-secret connection.
+ */
+export async function saveObjectStoreConfig(fields) {
+  return await writeConnection({ action: 'save', ...fields })
+}
+
+/**
+ * Forget the saved connection; same error contract as
+ * {@link saveObjectStoreConfig}.
+ * @returns `{ config: null, source: null }`.
+ */
+export async function clearObjectStoreConfig() {
+  return await writeConnection({ action: 'clear' })
+}
+
+/**
+ * POST one connection action and map the answer to a stable error message.
+ * @param payload - the JSON body the route expects.
+ * @returns `{ config, source }` on success.
+ */
+async function writeConnection(payload) {
+  const response = await fetch(HOST_CONFIG, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (response.status === 404 || response.status === 405 || response.status === 501) {
+    throw new Error('objstore-config-unsupported')
+  }
+  const body = await response.json().catch(() => undefined)
+  if (response.ok && body !== null && body !== undefined && body.ok === true) {
+    return {
+      config: body.config === null || body.config === undefined ? null : body.config,
+      source: typeof body.source === 'string' ? body.source : null,
+    }
+  }
+  const error = new Error(mapConnectionStatus(response.status))
+  if (typeof body?.error === 'string') error.reason = body.error
+  throw error
+}
+
+/**
+ * Map a failed connection-route status to the panel's message key.
+ * @param status - the HTTP status the route answered.
+ * @returns the stable message key.
+ */
+function mapConnectionStatus(status) {
+  if (status === 400) return 'objstore-config-invalid'
+  if (status === 409) return 'objstore-config-environment'
+  if (status === 502) return 'objstore-config-unverified'
+  return 'objstore-config-http-' + status
+}
+
 /** Request one JSON document from one absolute-or-same-origin path. */
 async function getJson(path, signal) {
   const response = await fetch(path, signal === undefined ? undefined : { signal })

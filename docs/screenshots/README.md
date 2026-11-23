@@ -117,3 +117,33 @@ and `arcs/root.usda` cases are what exercise that (`…-details.png` in `tests/.
 `details-referenced.png` is that second case: `refs/unit.usda` with the referenced mesh
 clicked, so the header names `/root/unit/body` (composed) and `/root/body` (authored), and
 the layer list names the referenced layer rather than the file that was opened.
+
+## Composition panel
+
+`composition-panel.png` — `arcs/root.usda`, **Composition** opened: root layer, its
+`subLayers = [@./sub/base.usda@]` child and the `prepend references = @./ref/body.usda@`
+child of `/root/unit`, each with the arc that placed it there, its container and prim count.
+`composition-payload.png` — `instancer/payload/root.usda`, where the only arc is a payload:
+the row names `@./modules/leaf.usda@</Mod>` and the prim that authored it (`/root/Mod`).
+Both are captured with `node tests/capture.mjs --modes composition` (the helper grew that
+flag with the feature). What the images are evidence for: the header counts (layers / arcs /
+unresolved), the root layer's `defaultPrim`/`upAxis`/`metersPerUnit` line, and that a
+payload is rendered by the same walk as a reference. The suite's negative cases — an arc to a
+layer the stage never composed, a cycle, an unreadable container — are asserted in
+`tests/composition.test.mjs`, not visible in a screenshot.
+
+## Text mode
+
+`text-mode.png` — `arcs/root.usda`, **Text** opened: the authored layer verbatim, with line
+numbers, semantics colouring (comments, quoted strings, `@asset@` paths, keywords, numbers),
+a layer picker for the layers the stage composed, wrap/copy controls, and the line/byte
+statement. `text-mode-crate.png` — `sample.usdc`, where no authored text exists: the panel
+shows the **reconstructed** USDA rendering, whose first lines state that it is a
+reconstruction and that long arrays are abbreviated; the crate's declared types, arcs and
+variant metadata are re-emitted by `src/client/usda-text.js` from the same decoded records
+Prim details uses. Both captured with `node tests/capture.mjs --modes text`.
+
+The panels bound what they decode (2 MiB / 4 000 lines / 2 000 characters per line) and the
+notice above the code states any omission; `tests/text-view.test.mjs` pins those cuts and
+the tokeniser's exact-reconstruction invariant, and `tests/usda-text.test.mjs` pins the
+serialiser's round trip through the layer reader.

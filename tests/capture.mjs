@@ -25,6 +25,8 @@
  *   --parts    also click the "Open all" toolbar button when the stage has parts,
  *              and capture a `-opened` frame
  *   --click    also click the canvas centre and capture a `-clicked` frame
+ *   --modes    comma-separated read-back modes to capture besides the viewport:
+ *              `text` (the Text toggle) and `composition` (the Composition modal)
  */
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -45,6 +47,7 @@ const prefix = arg('prefix', 'shot')
 const fixtures = arg('fixtures', 'arcs/root.usda').split(',').map(entry => entry.trim()).filter(Boolean)
 const viewport = { width: 900, height: 640 }
 const waitMs = Number(arg('wait', '1600'))
+const modes = arg('modes', '').split(',').map(entry => entry.trim()).filter(Boolean)
 
 const work = await mkdtemp(join(tmpdir(), 'usd-capture-'))
 const bundlePath = join(work, 'harness.js')
@@ -141,6 +144,32 @@ try {
         await page.locator('#host').screenshot({ path: clickedShot })
         process.stdout.write(`click ${fixture} -> ${clickedShot}\n`)
       }
+    }
+
+    // The read-back modes are separate captures: each replaces (text) or covers
+    // (composition) the viewport, so the base shot cannot show them.
+    for (const mode of modes) {
+      const toggle = page.locator(`[data-usd-${mode}-toggle]`).first()
+      if (await toggle.count() === 0) continue
+      await toggle.click()
+      if (mode === 'text') {
+        await page.locator('[data-usd-text]').waitFor({ timeout: 20_000 })
+        // The active layer's read is async; wait for the settled state, not the
+        // first paint, or the capture shows "Reading the layer…".
+        await page.waitForFunction(() => {
+          const node = document.querySelector('[data-usd-text]')
+          return node !== null && (node.getAttribute('data-usd-text-kind') ?? '') !== ''
+        }, undefined, { timeout: 20_000 })
+      } else {
+        await page.locator('[data-usd-composition]').waitFor({ timeout: 20_000 })
+      }
+      await page.waitForTimeout(700)
+      const modeShot = join(out, name.replace(/\.png$/, `-${mode}.png`))
+      await page.locator('#host').screenshot({ path: modeShot })
+      process.stdout.write(`${mode} ${fixture} -> ${modeShot}\n`)
+      if (mode === 'text') await page.locator('[data-usd-text-close]').click()
+      else await page.locator('[data-usd-composition-close]').click()
+      await page.waitForTimeout(300)
     }
     await page.close()
   }

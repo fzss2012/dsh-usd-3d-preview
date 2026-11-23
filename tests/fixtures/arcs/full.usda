@@ -1,0 +1,69 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = "Every composition arc a layer can author, for the details and composition panels."
+    subLayers = [
+        @./sub/base.usda@,
+        @./ref/other.usda@
+    ]
+)
+
+class Xform "Base"
+{
+    def Mesh "shape"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    }
+}
+
+def Xform "Special" (
+    kind = "group"
+)
+{
+}
+
+def Xform "root" (
+    kind = "component"
+    inherits = </Base>
+    specializes = </Special>
+    prepend references = [@./ref/body.usda@, @./ref/other.usda@</Other>]
+    append payload = @./payload/heavy.usda@</Heavy>
+    variants = {
+        string modeling = "simple"
+        string look = "red"
+    }
+    variantSets = ["modeling", "look"]
+)
+{
+    def Xform "unit" (
+        prepend references = @./ref/body.usda@</root>
+    )
+    {
+        double3 xformOp:translate = (3, 0, 0)
+    }
+
+    variantSet "modeling" = {
+        "simple" {
+            def Xform "unit" {
+            }
+        }
+
+        "fancy" {
+            def Xform "unit" {
+                double3 xformOp:translate = (9, 0, 0)
+            }
+        }
+    }
+
+    variantSet "look" = {
+        "red" {
+        }
+
+        "blue" {
+        }
+    }
+}

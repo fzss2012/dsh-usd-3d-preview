@@ -392,4 +392,94 @@ say('objstore fallback     gateway used when the host has no library; 403/404 ma
 }
 say('objstore public url   absolute from the host endpoint, page-relative otherwise')
 
-process.stdout.write('objstore.test.mjs  OK  (paths, request cache, address descriptor)\n')
+// ── saved connection: the route contract, and the cache it invalidates ─────
+
+{
+  // A composition without the host half: the route is simply absent, and the
+  // page is told so rather than being given an empty connection.
+  const mod = await import('../src/client/objstore.js?config=absent')
+  await withFetch(async () => errorResponse(404), async () => {
+    assert.equal(await mod.loadObjectStoreConfig(), undefined, 'a missing route is reported as unsupported')
+    await assert.rejects(
+      () => mod.saveObjectStoreConfig({ endpoint: 'https://s3.example.com' }),
+      /objstore-config-unsupported/,
+      'saving through a missing route is refused, not silently dropped',
+    )
+  })
+}
+
+{
+  const mod = await import('../src/client/objstore.js?config=stored')
+  const stored = {
+    endpoint: 'https://s3.example.com', bucket: 'asset', region: 'us-east-1',
+    rootPrefix: 'L0/', accessKey: 'AKIAEXAMPLE', hasSecret: true,
+  }
+  const posted = []
+  await withFetch(async ({ url, options }) => {
+    if (url === '/api/usd-preview/health') return jsonResponse({ ok: true, library: { bucket: 'asset', endpoint: 'https://s3.example.com', rootPrefix: 'L0/' } })
+    if (url === '/api/usd-preview/objstore/config' && options?.method === 'POST') {
+      posted.push(JSON.parse(options.body))
+      const body = JSON.parse(options.body)
+      return jsonResponse(body.action === 'clear'
+        ? { ok: true, source: null, config: null }
+        : { ok: true, source: 'config-file', config: stored })
+    }
+    if (url === '/api/usd-preview/objstore/config') return jsonResponse({ ok: true, source: 'config-file', config: stored })
+    if (url.startsWith('/api/usd-preview/list?')) return jsonResponse({ bucket: 'asset', prefix: 'L0/', entries: [], truncated: false })
+    return errorResponse(404)
+  }, async (requests) => {
+    const read = await mod.loadObjectStoreConfig()
+    assert.deepEqual(read, { config: stored, source: 'config-file' }, 'the stored connection and its source are reported')
+    assert.ok(!JSON.stringify(read).includes('supersecret'), 'the read shape carries no secret')
+
+    const saved = await mod.saveObjectStoreConfig({
+      endpoint: 'https://s3.example.com', bucket: 'asset', region: 'us-east-1',
+      rootPrefix: 'L0/', accessKey: 'AKIAEXAMPLE', secretKey: 'supersecret',
+    })
+    assert.deepEqual(saved, { config: stored, source: 'config-file' })
+    assert.deepEqual(posted[0], {
+      action: 'save', endpoint: 'https://s3.example.com', bucket: 'asset', region: 'us-east-1',
+      rootPrefix: 'L0/', accessKey: 'AKIAEXAMPLE', secretKey: 'supersecret',
+    }, 'every field the panel collects reaches the route')
+
+    const cleared = await mod.clearObjectStoreConfig()
+    assert.deepEqual(cleared, { config: null, source: null }, 'clearing answers with nothing stored')
+    assert.equal(posted[1].action, 'clear')
+
+    // The listing cache is what a just-saved connection must not be served from.
+    await mod.listPrefix('L0/')
+    await mod.listPrefix('L0/')
+    assert.equal(requests.filter(request => request.url.startsWith('/api/usd-preview/list')).length, 1,
+      'a repeated listing inside the cache window is shared')
+    mod.resetObjectStoreCaches()
+    await mod.listPrefix('L0/')
+    assert.equal(requests.filter(request => request.url.startsWith('/api/usd-preview/list')).length, 2,
+      'after a save the next listing is asked again instead of being served from the old backend')
+  })
+}
+
+{
+  const mod = await import('../src/client/objstore.js?config=errors')
+  const cases = [
+    [400, 'invalid-bucket', 'objstore-config-invalid'],
+    [409, 'environment-config', 'objstore-config-environment'],
+    [502, 'denied', 'objstore-config-unverified'],
+    [502, 'unreachable', 'objstore-config-unverified'],
+    [500, 'boom', 'objstore-config-http-500'],
+  ]
+  for (const [status, error, message] of cases) {
+    await withFetch(async () => new Response(JSON.stringify({ ok: false, error }), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    }), async () => {
+      const failure = await mod.saveObjectStoreConfig({ endpoint: 'https://s3.example.com' })
+        .then(() => undefined, caught => caught)
+      assert.ok(failure !== undefined, `HTTP ${status} is reported as a failure`)
+      assert.equal(failure.message, message, `HTTP ${status} maps to ${message}`)
+      if (status !== 500) assert.equal(failure.reason, error, 'the route reason survives for the panel')
+    })
+  }
+}
+say('objstore connection  saved connection read/save/clear, missing route, error mapping, cache reset')
+
+process.stdout.write('objstore.test.mjs  OK  (paths, request cache, address descriptor, saved connection)\n')

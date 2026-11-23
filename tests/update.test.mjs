@@ -280,7 +280,7 @@ try {
     }
     const hostHalf = await import('../src/host/index.js')
     hostHalf.apply(hostContext)
-    assert.equal(routes.size, 5, 'asset, health, list, search and update routes are registered')
+    assert.equal(routes.size, 6, 'asset, health, list, search, update and connection routes are registered')
     const updateRoute = routes.get('/api/usd-preview/update')
     assert.ok(updateRoute !== undefined, 'the update route is registered')
     assert.deepEqual(updateRoute.methods, ['GET', 'POST'], 'the update route takes status reads and explicit actions')

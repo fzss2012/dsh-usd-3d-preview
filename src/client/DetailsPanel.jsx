@@ -21,8 +21,17 @@
  *     shown beside the name the way usdview's metadata column does;
  *   - **Relationships** lists the authored relationships with their resolved
  *     target paths;
- *   - **Composition** names the arcs the prim participates in (`inherits`,
- *     `specializes`, variant sets) and the layers that described it.
+ *   - **Composition** is the complete LIVRPS set the prim participates in:
+ *     references and payloads (with the prim each composes and the layer each
+ *     resolved to), inherits, specializes, and the variant sets with their
+ *     declared variants and authored selection. No arc is left out because it is
+ *     hard to read back — a reference the stage did not compose is stated, not
+ *     omitted.
+ *   - **Layers** names every layer that described the prim, and each row carries
+ *     the arc it was reached through (root, sublayer, reference, payload), so a
+ *     value pulled from a referenced file stays traceable to the arc that placed
+ *     it there. A layer present in the stage but not decodable is listed with
+ *     its reason.
  *
  * The one deliberate difference: usdview shows the *composed* value, while this
  * panel shows **the value the strongest layer authored**, and names that layer.
@@ -182,6 +191,39 @@ const CHIP = {
   fontSize: 10,
 }
 
+/** One composition arc, laid out as "asset → composed prim" over its source layer. */
+const ARC = {
+  display: 'block',
+  margin: '1px 0 4px',
+  paddingLeft: 6,
+  borderLeft: `2px solid ${BORDER}`,
+  minWidth: 0,
+}
+
+const ARC_HEAD = { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: 4, minWidth: 0 }
+
+const ARC_ASSET = { color: ACCENT, fontFamily: MONO, wordBreak: 'break-all' }
+
+const ARC_TARGET = { color: LABEL, fontFamily: MONO, wordBreak: 'break-all' }
+
+const ARC_META = { display: 'block', color: LABEL_DIM, fontFamily: MONO, fontSize: 10, wordBreak: 'break-all' }
+
+const ARC_MISSING = { ...ARC_META, color: ERROR }
+
+/** One describing layer: its key, the arc it was reached through, and a "text" jump. */
+const LAYER = {
+  display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr) auto',
+  gap: 6,
+  padding: '2px 8px',
+  alignItems: 'baseline',
+}
+
+const LAYER_KEY = { fontFamily: MONO, wordBreak: 'break-all', color: LABEL }
+const LAYER_ARC = { color: LABEL_DIM, fontSize: 10, fontFamily: MONO, wordBreak: 'break-all', textAlign: 'right' }
+
+const ROLE_CHIP = { ...CHIP, background: 'transparent', color: LABEL_DIM }
+
 const NOTE = { padding: '4px 8px', color: LABEL_DIM, lineHeight: 1.6 }
 const FAILED = { ...NOTE, color: ERROR }
 
@@ -219,6 +261,58 @@ function AttributeRow({ attribute, showLayer }) {
       </span>
       <span style={ATTR_VALUE} data-usd-detail-value>{attribute.value === '' ? '—' : attribute.value}</span>
     </div>
+  )
+}
+
+/**
+ * The arc a describing layer was reached through, in a reader's words.
+ * @param arc - one DetailLayerArc, or undefined for a layer with no provenance.
+ * @param label - the dictionary lookup.
+ * @returns a short role label.
+ */
+function layerRoleLabel(arc, label) {
+  if (arc === undefined) return ''
+  const from = typeof arc.from === 'string' && arc.from !== '' ? arc.from.split('/').filter(Boolean).pop() ?? arc.from : ''
+  if (arc.kind === 'sublayer') {
+    return from === '' ? label('layerSublayer', 'sublayer') : `${label('layerSublayer', 'sublayer')} · ${from}`
+  }
+  if (arc.kind === 'reference' || arc.kind === 'payload') {
+    const role = arc.kind === 'reference' ? label('layerReference', 'reference') : label('layerPayload', 'payload')
+    const where = arc.fromPath !== '' ? arc.fromPath : from
+    return where === '' ? role : `${role} · ${where}`
+  }
+  return label('layerRoot', 'root layer')
+}
+
+/** The hover text of a layer row: the authored arc, when it has one. */
+function arcTitle(arc) {
+  if (arc === undefined) return ''
+  if (arc.asset === '') return arc.kind
+  const prim = arc.prim === '' ? '' : '<' + arc.prim + '>'
+  return `@${arc.asset}@${prim}`
+}
+
+/**
+ * One reference or payload row: the authored asset and prim, then where it composed.
+ * @param props.arc - one DetailArc from the details reader.
+ * @param props.targetLabel - what to show when no prim is resolvable.
+ * @param props.missingLabel - the note for an arc the stage never composed.
+ * @returns the row.
+ */
+function ArcEntry({ arc, targetLabel, missingLabel }) {
+  const authored = `@${arc.asset}@` + (arc.prim === '' ? '' : '<' + arc.prim + '>')
+  const target = arc.targetPrim === '' ? targetLabel : arc.targetPrim
+  return (
+    <span style={ARC} data-usd-detail-arc={arc.kind} data-usd-detail-arc-asset={arc.asset}>
+      <span style={ARC_HEAD}>
+        <span style={ARC_ASSET}>{authored}</span>
+        <span style={{ color: LABEL_DIM }}>→</span>
+        <span style={ARC_TARGET}>{target}</span>
+      </span>
+      {arc.targetLayer === ''
+        ? <span style={ARC_MISSING}>{missingLabel}</span>
+        : <span style={ARC_META}>{arc.targetLayer}</span>}
+    </span>
   )
 }
 
@@ -282,6 +376,15 @@ export function PrimDetailsPanel({ path, read, onClose, t }) {
     }
     return [...groups.entries()]
   }, [details])
+  // The composition block is drawn only when the prim actually participates in an
+  // arc: an empty heading on every plain mesh would be noise, not information.
+  const hasComposition = details !== undefined && (
+    details.references.length > 0
+    || details.payloads.length > 0
+    || details.inherits.length > 0
+    || details.specializes.length > 0
+    || details.variantSets.length > 0
+  )
 
   return (
     <div style={PANEL} data-usd-details>
@@ -299,7 +402,20 @@ export function PrimDetailsPanel({ path, read, onClose, t }) {
         ) : state.status === 'unsupported' ? (
           <div style={NOTE}>{label('detailsUnsupported', 'This stage was composed without keeping its layer bytes, so its declarations cannot be read back.')}</div>
         ) : details === undefined || details.present !== true ? (
-          <div style={NOTE}>{label('detailsMissing', 'No layer in this stage describes that prim.')}</div>
+          <>
+            <div style={NOTE}>{label('detailsMissing', 'No layer in this stage describes that prim.')}</div>
+            {details === undefined || details.unreadableLayers.length === 0 ? null : (
+              <>
+                <div style={SECTION}>{label('detailUnreadable', 'Not read back')}</div>
+                {details.unreadableLayers.map(entry => (
+                  <div key={entry.key} style={FAILED} data-usd-detail-unreadable={entry.key}>
+                    <span style={{ fontFamily: MONO, wordBreak: 'break-all' }}>{entry.key}</span>
+                    <span style={{ display: 'block', opacity: 0.8 }}>{entry.reason}</span>
+                  </div>
+                ))}
+              </>
+            )}
+          </>
         ) : (
           <>
             <div style={PATH} title={details.path}>{details.path}</div>
@@ -322,14 +438,49 @@ export function PrimDetailsPanel({ path, read, onClose, t }) {
                 </div>
               </>
             )}
-            {details.variantSets.length === 0 ? null : (
-              <Row label={label('detailVariants', 'Variant sets')}>{details.variantSets.join(', ')}</Row>
-            )}
-            {details.inherits.length === 0 ? null : (
-              <Row label={label('detailInherits', 'Inherits')}>{details.inherits.join(', ')}</Row>
-            )}
-            {details.specializes.length === 0 ? null : (
-              <Row label={label('detailSpecializes', 'Specializes')}>{details.specializes.join(', ')}</Row>
+            {hasComposition === false ? null : (
+              <>
+                <div style={SECTION} data-usd-detail-composition>{label('detailComposition', 'Composition')}</div>
+                {details.references.length === 0 ? null : (
+                  <Row label={label('detailReferences', 'References')}>
+                    {details.references.map((arc, index) => (
+                      <ArcEntry key={index} arc={arc} targetLabel="—" missingLabel={label('detailArcMissing', 'not composed by this stage')} />
+                    ))}
+                  </Row>
+                )}
+                {details.payloads.length === 0 ? null : (
+                  <Row label={label('detailPayloads', 'Payloads')}>
+                    {details.payloads.map((arc, index) => (
+                      <ArcEntry key={index} arc={arc} targetLabel="—" missingLabel={label('detailArcMissing', 'not composed by this stage')} />
+                    ))}
+                  </Row>
+                )}
+                {details.inherits.length === 0 ? null : (
+                  <Row label={label('detailInherits', 'Inherits')}>{details.inherits.join(', ')}</Row>
+                )}
+                {details.specializes.length === 0 ? null : (
+                  <Row label={label('detailSpecializes', 'Specializes')}>{details.specializes.join(', ')}</Row>
+                )}
+                {details.variantSets.map((set) => {
+                  const variants = details.variantNames[set] ?? []
+                  const selected = details.variantSelections[set]
+                  return (
+                    <div style={ROW} key={set} data-usd-detail-variant-set={set}>
+                      <span style={ROW_KEY}>{set}</span>
+                      <span style={ROW_VALUE}>
+                        {variants.length === 0
+                          ? <span style={{ color: LABEL_DIM }}>{label('detailVariantUnknown', 'declared')}</span>
+                          : variants.join(', ')}
+                        {selected === undefined || selected === '' ? null : (
+                          <span style={ROLE_CHIP} data-usd-detail-variant-selected={selected}>
+                            {label('detailVariantSelected', 'selected')}: {selected}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  )
+                })}
+              </>
             )}
             {details.doc === '' ? null : (
               <Row label={label('detailDoc', 'Doc')}>{details.doc}</Row>
@@ -354,9 +505,26 @@ export function PrimDetailsPanel({ path, read, onClose, t }) {
               </>
             )}
             <div style={SECTION}>{label('detailLayers', 'Layers')} · {details.layers.length}</div>
-            <div style={{ padding: '0 8px', color: LABEL_DIM, fontFamily: MONO, wordBreak: 'break-all' }}>
-              {details.layers.join('\n')}
-            </div>
+            {details.layers.map((key, index) => {
+              const arc = details.layerArcs[index]
+              return (
+                <div style={LAYER} key={key + ':' + index} data-usd-detail-layer={key} data-usd-detail-layer-kind={arc?.kind ?? ''}>
+                  <span style={LAYER_KEY}>{key}</span>
+                  <span style={LAYER_ARC} title={arcTitle(arc)}>{layerRoleLabel(arc, label)}</span>
+                </div>
+              )
+            })}
+            {details.unreadableLayers.length === 0 ? null : (
+              <>
+                <div style={SECTION}>{label('detailUnreadable', 'Not read back')} · {details.unreadableLayers.length}</div>
+                {details.unreadableLayers.map(entry => (
+                  <div key={entry.key} style={FAILED} data-usd-detail-unreadable={entry.key}>
+                    <span style={{ fontFamily: MONO, wordBreak: 'break-all' }}>{entry.key}</span>
+                    <span style={{ display: 'block', opacity: 0.8 }}>{entry.reason}</span>
+                  </div>
+                ))}
+              </>
+            )}
           </>
         )}
       </div>
