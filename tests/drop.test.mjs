@@ -46,6 +46,16 @@ assert.equal(modelKindOf('pkg/model.ifc'), 'ifc')
 assert.equal(modelKindOf('pkg/model.ifczip'), 'ifc')
 assert.equal(modelKindOf('pkg/root.usda'), 'usd')
 
+// A modeling-session archive is the third kind the same door opens: the manifest
+// names a folder whose newest snapshot the page composes.
+assert.equal(isModelName('session.json'), true)
+assert.equal(isModelName('SESSION.JSON'), true, 'the manifest name check is case-insensitive')
+assert.equal(isModelName('archives/robot/session.json'), true)
+assert.equal(isModelName('robot.session.json'), true, 'a renamed manifest still opens its directory')
+assert.equal(isModelName('notes.json'), false, 'another JSON file keeps the shell attachment path')
+assert.equal(modelKindOf('archives/robot/session.json'), 'session')
+assert.equal(isUsdName('session.json'), false, 'a manifest is not a USD layer')
+
 assert.equal(dropKey('./a/b.usda'), 'a/b.usda')
 assert.equal(dropKey('pkg\\geom\\body.usda'), 'pkg/geom/body.usda')
 
@@ -75,6 +85,31 @@ assert.deepEqual(modelCandidates(mixed), [
 ])
 // Two models at the shallowest depth are a choice, not a guess.
 assert.equal(defaultModel(modelCandidates(mixed)), undefined)
+
+// A session archive folder: the manifest is the shallowest candidate, so it is
+// what opens, and the snapshot beneath it is offered but not guessed at.
+const archive = new Map([
+  ['arch/session.json', new Blob(['{}'])],
+  ['arch/commits/00000000000000000002.json', new Blob(['{}'])],
+  ['arch/snapshots/00000000000000000002.usda', new Blob(['x'])],
+])
+assert.deepEqual(modelCandidates(archive), [
+  { key: 'arch/session.json', kind: 'session' },
+  { key: 'arch/snapshots/00000000000000000002.usda', kind: 'usd' },
+])
+assert.equal(defaultModel(modelCandidates(archive)), 'arch/session.json', 'the folder opens its manifest, not a snapshot')
+
+// At one depth the archive manifest orders before a USD layer, and two of them
+// are a choice like any other pair.
+const beside = new Map([
+  ['pkg/session.json', new Blob(['{}'])],
+  ['pkg/root.usda', new Blob(['x'])],
+])
+assert.deepEqual(modelCandidates(beside), [
+  { key: 'pkg/session.json', kind: 'session' },
+  { key: 'pkg/root.usda', kind: 'usd' },
+])
+assert.equal(defaultModel(modelCandidates(beside)), undefined)
 assert.equal(defaultModel([{ key: 'a.usd', kind: 'usd' }, { key: 'b.usd', kind: 'usd' }]), undefined)
 assert.equal(defaultModel([{ key: 'a.ifc', kind: 'ifc' }]), 'a.ifc')
 assert.equal(defaultModel([]), undefined)
@@ -118,10 +153,12 @@ assert.equal(emptyDrop.models.length, 0)
 // ── what counts as this preview's drag ──────────────────────────────────────
 const usdItem = { kind: 'file', getAsFile: () => stageFile }
 const ifcItem = { kind: 'file', getAsFile: () => modelFile }
+const sessionItem = { kind: 'file', getAsFile: () => new File([encoder.encode('{}')], 'session.json') }
 const pdfItem = { kind: 'file', getAsFile: () => new File(['x'], 'doc.pdf') }
 const folderItem = { kind: 'file', webkitGetAsEntry: () => ({ isDirectory: true, isFile: false, name: 'pkg' }) }
 assert.equal(acceptsDroppedAsset({ items: [usdItem] }), true)
 assert.equal(acceptsDroppedAsset({ items: [ifcItem] }), true, 'an IFC model is this preview\'s drop too')
+assert.equal(acceptsDroppedAsset({ items: [sessionItem] }), true, 'a session manifest is this preview\'s drop too')
 assert.equal(acceptsDroppedAsset({ items: [pdfItem] }), false, 'a PDF keeps the shell attachment path')
 assert.equal(acceptsDroppedAsset({ items: [folderItem] }), true, 'a folder may hold a stage or a model')
 assert.equal(acceptsDroppedAsset(undefined), false)

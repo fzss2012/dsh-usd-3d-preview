@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const SUITES = ['instancer', 'register', 'drop', 'prim-tree', 'selection', 'details', 'parse', 'ifc', 's3', 'objstore', 'directS3', 'update', 'articulation', 'studio', 'articulation-render', 'render', 'ifc-render', 'drop-ifc-render']
+const SUITES = ['instancer', 'register', 'drop', 'session', 'prim-tree', 'selection', 'details', 'composition', 'text-view', 'usda-text', 'parse', 'ifc', 's3', 'config', 'objstore', 'directS3', 'revisions', 'update', 'articulation', 'studio', 'articulation-render', 'render', 'ifc-render', 'drop-ifc-render', 'session-render', 'objstore-render']
 const ALLOW_SKIP = process.env.DSH_ALLOW_BROWSER_SKIP === '1'
 
 /** Run one suite, teeing its output and reporting whether it skipped. */

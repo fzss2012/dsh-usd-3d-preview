@@ -10,7 +10,9 @@
  *
  * An IFC model takes the same door with a different reader: a model is one file,
  * so the page reads its bytes here and mounts `IfcBody` — the same viewport the
- * Files tab opens by address.
+ * Files tab opens by address. A modeling-session archive is a folder: its
+ * `session.json` is the candidate to open, and `SessionBody` reads the newest
+ * snapshot and commit record from the same drop's file table.
  *
  * The component owns three states: an empty drop zone, a picker when one drop
  * carries several models, and the viewport. A drop can arrive at any of them —
@@ -22,6 +24,7 @@ import { UsdPreviewGlyph } from './artwork.jsx'
 import { collectDropped, defaultModel, subscribeDropped, takePendingDropped } from './dropped.js'
 import { IfcBody } from './IfcBody.jsx'
 import { openStage } from './s3open.js'
+import { SessionBody } from './SessionBody.jsx'
 import { UsdBody } from './UsdBody.jsx'
 import {
   ACCENT, BASE, BORDER, BORDER_STRONG, ERROR, FONT, LABEL, LABEL_DIM, LAYER, PRIMARY_FILL, PRIMARY_INK, SURFACE,
@@ -336,6 +339,8 @@ export function UsdDropBody(props) {
           </div>
         ) : remote ? (
           <UsdBody t={t} remoteStage={drop.remoteStage} />
+        ) : active.kind === 'session' ? (
+          <SessionBody t={t} droppedFiles={drop.files} droppedRootKey={active.key} />
         ) : active.kind === 'ifc' ? (
           <DroppedIfcBody t={t} file={drop.files?.get(active.key)} name={modelName(active.key)} />
         ) : (
@@ -346,7 +351,7 @@ export function UsdDropBody(props) {
         ref={fileInput}
         type="file"
         multiple
-        accept=".usd,.usda,.usdc,.usdz,.ifc,.ifczip"
+        accept=".usd,.usda,.usdc,.usdz,.ifc,.ifczip,.json"
         onChange={onPicked}
         style={{ display: 'none' }}
       />

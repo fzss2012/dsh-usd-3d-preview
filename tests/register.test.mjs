@@ -67,7 +67,7 @@ for (let index = 0; index < LARGE.length; index += 1) LARGE[index] = index % 251
 /** Every public service the client half touches, recorded for the assertions below. */
 const seen = {
   effects: [], definitions: [], locales: [], injects: [], slots: [],
-  reads: [], windows: [], stats: [], types: [], opened: [],
+  reads: [], windows: [], stats: [], listings: [], types: [], opened: [],
 }
 const ctx = {
   locale: {
@@ -121,6 +121,25 @@ const ctx = {
         return {
           ok: true,
           value: { absolutePath: '/workspace/' + path, version: 'v1', bytes: path === 'workspace/large.usd' ? LARGE.length : 3 },
+        }
+      },
+      // The session preview lists an archive's folders before reading them; a
+      // missing folder is a non-ok result, never a throw.
+      async list(sessionId, path) {
+        seen.listings.push({ sessionId, path })
+        if (path.endsWith('/missing')) {
+          return { ok: false, error: { code: 'workspace-file/not-found', message: 'no such directory', details: { path } } }
+        }
+        return {
+          ok: true,
+          value: {
+            path,
+            entries: [
+              { name: '00000000000000000002.usda', type: 'file', size: 3 },
+              { name: '00000000000000000001.usda', type: 'file', size: 3 },
+            ],
+            truncated: false,
+          },
         }
       },
     },
@@ -211,11 +230,12 @@ assert.deepEqual(seen.injects, [
   'sidebar.right.tab.document',
   'sidebar.right.pane.tab',
   'sidebar.right.pane.tab',
+  'sidebar.right.pane.tab',
   'settings.plugins.tab',
   'plugins.detail.badge',
   'plugins.detail.section',
 ])
-assert.equal(seen.slots.length, 7, 'two document bodies, both page bodies and the three update surfaces are registered once each')
+assert.equal(seen.slots.length, 8, 'two document bodies, three page bodies and the three update surfaces are registered once each')
 const bodies = seen.slots.filter(slot => slot.options.name === 'sidebar.right.tab.document')
 assert.equal(bodies.length, 2, 'each format owns one keyed document body')
 const body = bodies.find(slot => slot.options.key === definition.id)
@@ -262,6 +282,39 @@ assert.equal(seen.stats.length, 1, 'the windowed fallback must stat the layer on
 assert.ok(seen.windows.length >= 3, 'the layer must arrive in several windows')
 assert.ok(seen.windows.every(window => window.length <= 1024 * 1024), 'a window must respect the Host cap')
 
+// A session archive is not a document-preview implementation: the registry
+// matches suffixes against `.<suffix>`, so it cannot claim the exact name
+// `session.json` without also taking every JSON file (or missing it entirely).
+// It is a sidebar tab type with a file-name glob instead, which selects the one
+// name and leaves the rest alone.
+const sessionType = seen.types.find(entry => entry.id === 'dsh-usd-3d-preview/session')
+assert.ok(sessionType !== undefined, 'the session archive tab type is registered')
+assert.equal(sessionType.kind, 'usd-session')
+assert.equal(sessionType.priority, 'extension', 'an outside type outranks the document preview fallback')
+assert.deepEqual([...sessionType.patterns], ['session.json', '*.session.json'])
+assert.equal(sessionType.canOpen('dsh-resource://file/session/s/arch/session.json'), true)
+assert.equal(sessionType.canOpen('dsh-resource://file/session/s/arch/notes.json'), false, 'a neighbour JSON file is not an archive')
+assert.equal(sessionType.canOpen('dsh-resource://file/absolute/home/me/session.json'), false, 'an absolute address has no Session to list through')
+assert.equal(sessionType.title('dsh-resource://file/session/s/arch/session.json'), 'session.json')
+const sessionBody = seen.slots.find(slot => slot.options.key === 'dsh-usd-3d-preview/session')
+assert.ok(sessionBody !== undefined, 'the session archive body is registered')
+assert.equal(sessionBody.options.name, 'sidebar.right.pane.tab')
+assert.equal(sessionBody.options.locale, 'usd3dPreview')
+assert.equal(typeof sessionBody.component, 'function')
+assert.equal(typeof sessionBody.options.inject, 'function', 'the archive needs the workspace readers')
+const sessionInjected = sessionBody.options.inject('session-1', undefined)
+assert.equal(typeof sessionInjected.readLayer, 'function')
+assert.equal(typeof sessionInjected.readAsset, 'function')
+assert.equal(typeof sessionInjected.listDirectory, 'function')
+const listing = await sessionInjected.listDirectory('session-1', 'arch/snapshots', undefined)
+assert.equal(listing.entries.length, 2, 'the listing is unwrapped to its entries')
+assert.deepEqual(seen.listings, [{ sessionId: 'session-1', path: 'arch/snapshots' }])
+assert.deepEqual(
+  await sessionInjected.listDirectory('session-1', 'arch/missing', undefined),
+  { error: 'workspace-file/not-found' },
+  'a missing folder is reported, not thrown',
+)
+
 assert.equal(seen.locales.length, 1)
 const [dictionary] = seen.locales
 assert.equal(dictionary.ns, 'usd3dPreview')
@@ -276,8 +329,10 @@ for (const value of Object.values(dictionary.dictionaries.en)) {
 
 // The external-asset entry point: a page tab type with a guide card, a body for
 // that tab, and the drop watcher that opens it from a drag over the sidebar.
-assert.equal(seen.types.length, 2, 'the USD preview and the object-storage page types are registered')
-const [type, objType] = seen.types
+assert.equal(seen.types.length, 3, 'the session archive, the USD preview and the object-storage page types are registered')
+const type = seen.types.find(entry => entry.kind === 'usd-3d-preview')
+const objType = seen.types.find(entry => entry.kind === 'usd-objstore')
+assert.ok(type !== undefined && objType !== undefined, 'both page types are registered')
 assert.equal(type.id, 'dsh-usd-3d-preview/panel')
 assert.equal(type.kind, 'usd-3d-preview')
 assert.equal(type.priority, 'extension', 'an outside type must not lose the kind to a product type')
@@ -291,7 +346,7 @@ assert.equal(typeof type.guide[0].icon, 'function', 'the guide entry carries its
 assert.equal(typeof type.guide[0].order, 'number')
 
 const pageBodies = seen.slots.filter(slot => slot.options.name === 'sidebar.right.pane.tab')
-assert.equal(pageBodies.length, 2, 'each page type owns one sidebar page body')
+assert.equal(pageBodies.length, 3, 'each page type owns one sidebar page body')
 const pageBody = pageBodies.find(slot => slot.options.key === type.id)
 assert.ok(pageBody !== undefined, 'the sidebar page body is not registered')
 assert.equal(pageBody.options.key, type.id, 'the tab body key must equal the type id')
@@ -337,7 +392,8 @@ assert.equal(updateSection.options.id, 'dsh-usd-3d-preview/update-section')
 assert.equal(typeof updateSection.component, 'function')
 
 // Every registration is owned by a reversible effect; the IFC preview adds two
-// (its document-preview definition and its keyed document body).
-assert.equal(seen.effects.length, 13, 'every registration is owned by a reversible effect')
+// (its document-preview definition and its keyed document body) and the session
+// archive adds its tab type and its body.
+assert.equal(seen.effects.length, 15, 'every registration is owned by a reversible effect')
 
 process.stdout.write(`register.test.mjs  OK  (${seen.effects.length} effects, ${requested.length} module requests)\n`)

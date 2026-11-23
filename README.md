@@ -5,10 +5,14 @@
 DeepSeek Harness (DSH) and drawing it in WebGL with a studio-lit viewport — orbit camera, a
 studio lighting rig with shadows, reference grid, and the measured bounding-box size.
 Authored `UsdPhysics` joints and colliders make a USD stage **interactive**: click a part to
-open or close it, drive the whole mechanism from a toolbar. An IFC model brings its own
-schema instead: a spatial tree of products, their property sets, and the surface styles it
-authored. Optional read-only object-storage support resolves `s3://` references through a
-signed host route. No converter process, no upload, no native toolchain.
+open or close it, drive the whole mechanism from a toolbar. Three read-back modes explain what
+the viewport shows: **Prim details** lists every LIVRPS composition arc a prim authors,
+**Composition** draws the layer stack and the arcs that composed it, and **Text** shows the
+layer's own USDA source — authored text for a `.usda`, a labelled reconstruction for a binary
+crate. An IFC model brings its own schema instead: a spatial tree of products, their property
+sets, and the surface styles it authored. Optional read-only object-storage support resolves
+`s3://` references through a signed host route. No converter process, no upload, no native
+toolchain.
 
 Two formats, two readers, one viewport. A **USD stage** is composed by OpenUSD itself — a
 pure-Rust build compiled to WebAssembly (`@huggingface/usd-web-viewer`, MIT) resolves
@@ -30,6 +34,12 @@ A stage reaches the preview one of two ways: a **workspace file opened by addres
 folder from the desktop onto the right Sidebar). Nothing is uploaded and nothing is written to the
 workspace in either case.
 
+A **modeling-session archive** — the folder a human+agent interactive modeling session writes —
+opens by its `session.json`. The plugin draws the archive's newest `snapshots/<rev>.usda` through
+that same USD viewport and states the session id, the model revision and the newest commit
+record's object summary above it. An archive written before snapshots existed still shows its
+session panel and says there is nothing to draw yet; nothing in an archive can crash the preview.
+
 It is one package in two halves: a **dsh bundle** and a **browser client plugin**.
 
 ```
@@ -40,11 +50,20 @@ dsh-usd-3d-preview
 ├─ src/                    the only source of truth: host/ + client/
 │    ├─ client/usd.js      USD definition + address helpers
 │    ├─ client/ifc.js      IFC definition + container/path helpers (no engine imports)
+│    ├─ client/session.js  modeling-session archive reader: manifest, revisions, commit summaries
+│    ├─ client/SessionBody.jsx the session panel, and the newest snapshot handed to UsdBody
 │    ├─ client/ifc-worker.js       the STEP reader, bundled with web-ifc
 │    ├─ client/ifc-worker-boot.js  the small script that inflates and starts it
 │    ├─ client/ifc-engine.js       worker handle + the three graph it builds
-│    └─ client/IfcBody.jsx         the IFC viewport and its element panel
-├─ tests/                  sixteen suites (including real Chromium pixel tests) + fixtures
+│    ├─ client/IfcBody.jsx         the IFC viewport and its element panel
+│    ├─ client/details.js          per-prim declarations and the complete LIVRPS arcs
+│    ├─ client/composition.js      the stage's layer tree and the arcs that placed each layer
+│    ├─ client/text-view.js        bounded USDA text, container classification, line lexer
+│    ├─ client/usda-text.js        decoded layer records → readable, re-parseable USDA text
+│    ├─ client/DetailsPanel.jsx    the selected prim's declarations and arcs
+│    ├─ client/CompositionPanel.jsx the layer-stack modal
+│    └─ client/TextPanel.jsx       the USDA text reader
+├─ tests/                  twenty-six suites (including real Chromium pixel tests) + fixtures
 └─ cordis.patch.yml        bundle patch layer: one `ui-usd-3d-preview` entry
 ```
 
@@ -90,12 +109,14 @@ Measured by `npm test` (fixtures are committed; the render suites draw them in C
 | Interactive / environment | WASM engine (default) | Fallback (three) |
 |---|---|---|
 | `UsdPhysics` joints (`PhysicsRevoluteJoint` / `PhysicsPrismaticJoint` / `PhysicsFixedJoint`) | ✅ read back from the composed layer bytes: body tree, axes, travel limits, home pose; click-to-toggle + All open / All close / Home | ❌ prim paths are lost in the fallback, no articulation |
-| Prim details (declared type / kind / attributes / relationships) | ✅ read back from the same layer bytes the stage was composed from, ASCII and crate alike | ❌ no layer map is kept, so the panel reports that the declarations cannot be read back |
+| Prim details (declared type / kind / attributes / relationships, and the complete LIVRPS arcs) | ✅ read back from the same layer bytes the stage was composed from, ASCII and crate alike: references and payloads with their resolved layer/prim, inherits, specializes, variant sets with their declared variants (where the container spells them) and the authored selection, and each describing layer's arc provenance | ❌ no layer map is kept, so the panel reports that the declarations cannot be read back |
+| Composition panel (layer stack + the arcs that placed each layer) | ✅ every layer the assembly kept, its metadata, the arc that reached it, unresolved arcs and cycles included; bounded walk states its clipping | ❌ the fallback keeps no layer map, so the panel says the arcs cannot be read back |
+| Text mode (the layer's own USDA text) | ✅ authored text for ASCII layers, a labelled reconstruction for a crate, with line numbers, wrap/copy and a stated line/byte bound; layers are read lazily and a layer picker lists the ones the assembly kept | ⚠️ the opened layer's own bytes are shown; the fallback kept no referenced layers |
 | Collider geometry (`purpose = "guide"` or `PhysicsCollisionAPI`) | ✅ rebuilt from the same bytes as an overlay + wireframe, hidden by default | ❌ |
 | Studio rendering | ✅ Khronos PBR Neutral tone mapping, PMREM environment, 4 rect lights, 2048² shadows, lit ground disc, on-demand draw | ✅ same view |
 | Selection highlight | ✅ the picked object is re-tinted in the accent under an instanced/parented copy; Esc, the panel's × or a background click clears it | ✅ same pick path — a stage the fallback composed is still clickable, but only names a prim when the engine kept the paths |
 | `s3://` asset-layer references | ✅ ASCII layers localized + prefetched through the host route (object storage must be configured) | ❌ |
-| Object-storage browser | ✅ the sidebar connects straight to MinIO/S3 with in-page SIGV4 or through the host's signed routes (`DSH_USD_S3_ROOT_PREFIX` confines it), searches recursively, and hands a stage to the preview | ❌ |
+| Object-storage browser | ✅ the sidebar connects to MinIO/S3 once (the connection is saved on this machine and the host signs every read; `DSH_USD_S3_ROOT_PREFIX` confines it), keeps its place across tab switches, shows versioned assets under their short paths with the newest revision, searches recursively, and hands a stage to the preview | ❌ |
 
 The stats line at the bottom of the panel reports **engine / layer count / warning count**, and
 the warnings are listed by engine code (`layer-missing`, `composition`, `material-fallback`,
@@ -124,6 +145,34 @@ With an articulated asset the panel also reports the number of moving parts in
 The IFC stats line reports **schema / element count / mesh count / triangle count / size**, plus
 the authored unit when it is not metres. The panel's element count is the number of objects the
 spatial structure carries, in `data-ifc-elements`; the schema is in `data-ifc-schema`.
+
+### Modeling session archive (`session.json`)
+
+A modeling-session archive is a plain local directory written by the human+agent interactive
+modeling session (the `usd-brep` spec): `session.json` (`session_id`, `archive_format_version`,
+`protocol_version`, and the build identity under `build`), one immutable
+`commits/<20-digit rev>.json` per successful commit, and one `snapshots/<rev>.usda` per committed
+revision once snapshot export runs. Opening the archive's `session.json`, or dropping the archive
+folder on the sidebar, previews the newest snapshot with the existing USD viewport and puts the
+session's own facts above it.
+
+| Input | What the preview does |
+|---|---|
+| `session.json` opened from the Files tab | ✅ claims that one file name (a sidebar tab type with a glob — every other `.json` keeps its Code viewer) and resolves `snapshots/` + `commits/` through the workspace Remote |
+| Archive folder dropped on the sidebar | ✅ the manifest is the shallowest candidate, so the folder opens the archive; its snapshot and record are read from the drop's own file table |
+| Newest snapshot | ✅ numeric revision ranking over `snapshots/<rev>.usda` (a 20-digit or plain decimal revision; `.usdc`/`.usd` are accepted too, and `.usda` is canonical), composed and drawn by the USD viewport — same engine, picking, details/text/composition panels, studio rig |
+| Session panel | ✅ session id, `model_rev` (the newest commit, or the newest snapshot when no record reads), and the newest commit record's object summary: object count, faces/edges/vertices, manifold, volume |
+| Missing `session.json` fields | ✅ named in the panel, not fatal — the archive still resolves |
+| No `snapshots/` folder (an older archive) | ✅ the session panel still shows what the archive records; the viewport is replaced by "no snapshots/ folder" rather than an error |
+| Empty `snapshots/` folder | ✅ "no rendered snapshot yet" |
+| Corrupt commit record | ✅ a warning naming the revision; the snapshot still draws (only the summary is absent) |
+| Snapshot older/newer than the newest commit | ✅ stated explicitly, so the viewport never implies it is the newest recorded state |
+| `session.json` opened by an absolute address | ❌ not claimed as an archive: without a Session there is no directory listing, so the newest snapshot's name cannot be learned |
+| `events.jsonl` / `renders/` | not read: `events.jsonl` is the runner's diagnostics and `renders/` is the M2 named-view output |
+
+The panel's data attributes are `data-session-state` on the body (`ready`, `no-snapshot`,
+`failed`), and `data-session-id`, `data-session-model-rev`, `data-session-snapshot-rev`,
+`data-session-objects` and `data-session-warnings` on the panel.
 
 ### Why IFC is a second preview implementation and not a suffix on the USD one
 
@@ -165,8 +214,13 @@ Files tab click                    drag a file/folder onto the sidebar
          │      │                    dropped path:   one pass, all bytes already in the page
          │      ├─ articulation: UsdPhysics read back from the same layer bytes
          │      │     (src/client/articulation.js → src/client/kinematics.js)
-         │      ├─ details: declared type / kind / apiSchemas / attributes / relationships
-         │      │     for the selected prim (src/client/layer-text.js + details.js)
+         │      ├─ details: declared type / kind / apiSchemas / attributes /
+         │      │     relationships and every LIVRPS arc of the selected prim
+         │      │     (src/client/layer-text.js + details.js)
+         │      ├─ composition: the layer tree and the arcs that placed each
+         │      │     layer (src/client/composition.js + CompositionPanel.jsx)
+         │      ├─ text: authored USDA, or a labelled reconstruction of a crate
+         │      │     (src/client/text-view.js + usda-text.js + TextPanel.jsx)
          │      └─ fallback: three USDCParser / USDAParser / USDComposer
          │
          ├─ createView()  (src/client/view.js)
@@ -202,16 +256,41 @@ Files tab click (.ifc)             (an IFC model is one self-contained STEP file
                 └─ createView()  — the same view, rig, pick and selection tint as USD
 ```
 
+A third, much smaller path reuses that USD viewport for a modeling-session archive. It is a
+sidebar **tab type** rather than a document-preview implementation, because the repository
+registry matches a declared suffix against `.<suffix>` and so cannot select the exact file name
+`session.json`:
+
+```
+Files tab click (session.json)        drop an archive folder on the sidebar
+   │                                        │
+   ├─ sidebarRightTabs 'usd-session'        ├─ UsdDropBody: model kind 'session'
+   │     patterns: session.json,            │     the manifest is the shallowest candidate
+   │               *.session.json           │
+   │     canOpen: a Session-scoped file     │
+   │                                        │
+   └─ sidebar.right.pane.tab                └─ SessionBody (same body)
+         (keyed body: SessionTabBody)              │
+                │                                  └─ dropped file table (keys = folder paths)
+                └─ workspace Remote (readBytes + list)
+                       │
+                       └─ resolveSessionArchive()  src/client/session.js
+                              ├─ session.json → id / archive / protocol / build
+                              ├─ snapshots/ → newest numeric revision
+                              ├─ commits/   → newest record → object summary
+                              └─ UsdBody(remoteStage | droppedFiles) ← the existing viewport
+```
+
 Everything that crosses a boundary is injected rather than imported: the USD body receives
 `readLayer` and `readAsset`, so the assembly is testable without a host and the workspace
 Remote remains the only component that knows how to locate a sibling file. (The IFC body needs
 no reader at all — a model is one file — which is why its registration injects nothing, and why
-the offline suite asserts that absence.) `index.jsx` registers thirteen reversible effects —
+the offline suite asserts that absence.) `index.jsx` registers fifteen reversible effects —
 the dictionaries, both preview definitions, both keyed document bodies, the sidebar page type
 (with its guide card), its tab body, the sidebar drop watcher, the object-storage page type and
-body, and the three update surfaces — through public client services only
-(`documentPreviews`, `sidebarRightTabs`, `sidebarRight`, `slots`, `locale`,
-`remote.workspaceFiles`).
+body, the session-archive tab type and body, and the three update surfaces — through public
+client services only (`documentPreviews`, `sidebarRightTabs`, `sidebarRight`, `slots`,
+`locale`, `remote.workspaceFiles`).
 
 ### The read-back loop
 
@@ -324,8 +403,16 @@ plugin splits the work:
    engine's `files` map under that key. Layers the engine still reports missing are fetched
    through the same loop and the stage is recomposed (up to 8 passes).
 
-Configuration is **environment-only**; nothing is read from a config file and no credentials
-are stored or logged:
+The library comes from two places, and the environment wins:
+
+* `DSH_USD_S3_*` (below) describes what the **deployment** reads. It is authoritative: a connection
+  saved from the sidebar is ignored while these variables name a library, so an operator cannot be
+  shadowed from a browser.
+* When the environment names no library, the host reads the connection the sidebar **saved**
+  (see the object-storage browser below): `$DSH_HOME/usd-3d-preview/object-store.json`, written
+  `0600` and only after the candidate connection has listed the bucket. Credentials are never
+  logged and never returned to the page — its read route reports `hasSecret` and an access key,
+  not the secret and not a local path.
 
 | Variable | Meaning |
 |---|---|
@@ -371,7 +458,10 @@ in the workspace:
 3. a dropped **folder** brings the layers and textures the stage references (Chrome's entry API,
    walked recursively), so a SimReady/unit layout composes exactly as it does on disk;
 4. one shallowest model opens by itself; two models at the same depth produce a picker instead of
-   a guess; a folder with no USD file or IFC model says so instead of silently doing nothing;
+   a guess; a folder with no USD file, IFC model or session archive says so instead of silently
+   doing nothing. A **modeling-session archive folder** is a candidate by its `session.json`,
+   which sits above `snapshots/`, so the folder opens the archive rather than one snapshot (see
+   *Modeling session archives* below);
 5. `.usdz` packages, `.usdc` crates and ASCII layers all take the same path, and the drop zone's
    *Choose file* / *Choose folder* buttons feed the same collection code;
 6. an `.ifc` or `.ifczip` file mounts the IFC viewport instead: the page reads the model's own
@@ -401,49 +491,123 @@ stays a warning rather than a failed preview. HTTP-referenced layers need the sa
 as the root, and an `s3://` layer inside an address-opened stage uses the same signing route as
 the root.
 
+### Modeling session archives
+
+A human+agent interactive modeling session archives itself as a plain local directory: `session.json`
+(`session_id`, `archive_format_version`, `protocol_version`, and the build identity under
+`build`), one immutable `commits/<20-digit rev>.json` per successful commit, and — once snapshot
+export runs — one `snapshots/<rev>.usda` per committed revision. Opening the archive's
+`session.json` from the Files tab, or dropping the archive folder on the sidebar, previews it:
+
+- **Snapshots are ranked numerically, not lexically.** The `snapshots/` folder is listed through
+  the same workspace Remote the USD preview reads layers with
+  (`remote.workspaceFiles.list`), the `<rev>.usda` names are compared as numbers, and the newest
+  is composed by the existing viewport — `UsdBody`, with the snapshot as the stage. The revision
+  may be the commit writer's 20-digit padding or a plain decimal, so a snapshot producer that
+  spells `2.usda` beside `00000000000000000002.json` is still read. There is no second renderer:
+  composition arcs, prim picking, the details/text/composition read-back modes and the studio rig
+  are the USD preview's own, and the snapshot's own references resolve through the same reader a
+  layer beside `session.json` would.
+- **A dropped folder needs no Session.** Every file is already in the drop's table, so the
+  snapshot and record are read by key. The manifest is the shallowest candidate, which is what
+  makes the folder open the archive rather than one snapshot.
+- **The panel is the archive, not the stage.** It states the session id, `model_rev` (the newest
+  commit record; the newest snapshot when no record reads) and the newest commit record's object
+  summary: object count, faces/edges/vertices, manifold and volume. The writer's record shape —
+  a top-level `objects` array whose entries carry `id`, `name`, `kind`, `faces`, `edges`,
+  `vertices`, `manifold` and `volume` — is read directly; a hand-authored `summary.objects` list,
+  a single-object `summary` and a bare `object_ids` list are understood too. A count no record
+  states (a kernel query can return `null`) is shown as "—" rather than summed as zero.
+  The manifest's flush spelling is `archive_format_version`/`build`; the shorter
+  `archive_version`/`build_id` and camelCase spellings are tolerated so a small hand-written
+  manifest stays readable.
+- **Failures are warnings, not a blank tab.** Missing manifest fields, an older archive without
+  `snapshots/`, an empty folder, an unreadable folder, a corrupt commit record, a record whose
+  declared revision does not match its file name, and a snapshot that lags (or leads) the newest
+  commit each become a line in the panel. Only a `session.json` that is not this archive's
+  manifest is a failed state, and it says which field set it lacked.
+- **A snapshot must be a drawable USD stage.** The exact-BRep `BrepArray` export is kernel data,
+  not geometry a renderer can draw in a browser; the snapshot export has to write `UsdGeom.Mesh`
+  prims (the kernel's `tessellate` / `usd.tessellate_file` / `usd.export_meshes` path). A stage
+  with no drawable prims still opens — the USD viewport says it has none — but there is nothing to
+  see. Authoring `upAxis` and `metersPerUnit` on the snapshot keeps its orientation and size
+  aligned with the session's own model units.
+- **One file name is claimed, not one suffix.** The document-preview registry matches a declared
+  suffix against `.<suffix>`, so it cannot claim the exact name `session.json`: declaring
+  `session.json` would only match `foo.session.json`, and declaring `json` would take every
+  other JSON file in the workspace. The sidebar tab registry matches address globs instead, so
+  the `usd-session` tab type claims `session.json` (and a renamed `*.session.json`) at the
+  `extension` band, ahead of the fallback text tab. Every other JSON file keeps the Code viewer.
+  An absolute-address manifest is vetoed by the tab type because a snapshot folder cannot be
+  listed without a Session.
+- **No host route, no network.** The manifest, the snapshots and the records all come from the
+  workspace Remote or the drop, exactly like a USD layer: there is no new route in `lib/index.js`
+  and no new dependency. The reader is
+  [`src/client/session.js`](src/client/session.js); the panel and the viewport hand-off are
+  [`src/client/SessionBody.jsx`](src/client/SessionBody.jsx).
+
 ### Object storage browser
 
 `lib/client.js` registers a second page tab, `usd-objstore`
 ([`src/client/ObjStoreBody.jsx`](src/client/ObjStoreBody.jsx)), whose guide card sits **before** the
 USD preview card: browsing is the source, previewing is where one object ends up.
 
-It has three backends, and picks one per page:
+It has four backends, in this order:
 
-1. **Browser-direct (no deployment, no restart, no environment variables).** The tab's **Connect**
-   panel takes an endpoint, bucket, region, root prefix and a key pair, and signs each read-only
-   GET with SIGV4 in the page via Web Crypto
-   ([directS3.js](src/client/directS3.js)). This works even when the bucket denies anonymous
-   `ListBucket` — a common MinIO/S3 setup that allows object `GET` but not listing — because
-   each listing is signed. The credentials live only in the module closure for the lifetime of
-   the tab: never uploaded, never written to disk or localStorage, never logged. The endpoint
+1. **The saved connection (the product path).** The **Connect** panel takes an endpoint, bucket,
+   region, root prefix and a key pair, and the page sends it once to
+   `POST /api/usd-preview/objstore/config`. The host validates it, **verifies it with a real signed
+   `ListObjectsV2` request** and only then writes it to
+   `$DSH_HOME/usd-3d-preview/object-store.json` (mode `0600`, written through a temporary file).
+   From then on every read is signed by the host (`GET /api/usd-preview/list|search|asset`), so the
+   page holds no credential after that one request and the bucket needs no CORS for the page at
+   all. The file survives a page reload and a Host restart; **Disconnect** removes it. `GET` on the
+   same route answers the non-secret half (`hasSecret` instead of the secret, never a local path),
+   which is what the **Edit** form prefills — a blank secret field keeps the stored one.
+2. **The deployment environment.** When `DSH_USD_S3_*` names a library, the host signs with it and
+   the page offers no editing: a save answers `409 environment-config` and the saved file is
+   ignored, because the environment is the operator's decision.
+3. **Browser-direct (a composition without the host half).** When the route is absent — no
+   Connection service — the panel falls back to signing each read-only GET with SIGV4 in the page
+   via Web Crypto ([directS3.js](src/client/directS3.js)), and says so ("used for this page only").
+   The credentials then live only in the module closure for the lifetime of the tab. The endpoint
    must answer CORS for the page, including the `authorization`, `x-amz-date` and
-   `x-amz-content-sha256` headers on an OPTIONS preflight; MinIO does by default. `Disconnect`
-   forgets the connection. A direct connection takes priority over the other two backends.
-2. **The host half (no extra deployment).** When `DSH_USD_S3_*` is configured,
-   `GET /api/usd-preview/list` and `GET /api/usd-preview/search` list with the host's own SigV4
-   credentials — the same trust-fenced `/api` channel the signed asset read uses. The browser
-   never holds a credential, and the listing works against a bucket that denies anonymous
-   `ListBucket`, which is the common MinIO/S3 configuration: anonymous `GET` of an object may be
-   allowed while listing is not.
-3. **A deployment gateway.** When neither a direct connection nor a host library exists, the
-   page falls back to the `/usd-asset-api/*` routes below, for a deployment that terminates them
-   elsewhere.
+   `x-amz-content-sha256` headers on an OPTIONS preflight; MinIO does by default.
+4. **A deployment gateway.** When none of the above exists, the page falls back to the
+   `/usd-asset-api/*` routes below, for a deployment that terminates them elsewhere.
 
 Either backend offers:
 
 - a lazy directory tree with breadcrumbs, per-folder filtering and refresh;
 - **recursive search** of the current prefix — USD-only by default (`.usd/.usda/.usdc/.usdz`), with
   an *All files* toggle, debounced, showing each match's folder, size and time;
+- **the directory survives a tab switch.** Switching sidebar tabs unmounts the body, so the page
+  remembers where it was (and its *USD only* / path-display choices) for the lifetime of the page
+  instead of returning to the bucket root. A remembered directory the current connection may no
+  longer list falls back to the root rather than showing a permission error;
+- **short paths for versioned assets.** Such a store keeps history under
+  `<asset>/revisions/<revision-id>/…`, so one file has one key per version. The toolbar's
+  **Short path / Version path** toggle decides what a path looks like. By default the page hides
+  the `revisions/<id>` segment: it shows the short path (`L0/CH/gate.usda`) with the revision as a
+  `#9ca318d` chip, hides the raw `revisions` folder (unless it is the only thing in the directory,
+  where hiding it would hide the asset), and — when one listing holds several revisions of the same
+  file, which is what a recursive search returns — shows only the **newest** one, so an asset is
+  always represented by the latest version's short path. *Version path* shows the raw keys, the
+  folder tree and every revision, which is also how an older revision is reached. Reads and copies
+  always use the real key: the short path is what the page displays, not a second object;
 - per row: **Preview** (hands the object to the USD preview tab through the same pending-drop
   channel the sidebar drag uses; referenced layers are then read through the readers below),
-  copy `s3://` URI, copy https URL, open in browser.
+  copy `s3://` URI, copy https URL, open in browser. Each file row carries its size and time on a
+  second line, because a name, a version, four actions and a timestamp do not fit on one line in a
+  sidebar-width column.
 
-The host routes need nothing beyond `DSH_USD_S3_*`. The gateway routes are **deployment-provided**:
+The host routes work with `DSH_USD_S3_*` or with the saved connection. The gateway routes are **deployment-provided**:
 this repository ships the page, not the gateway that terminates them, and they are only consulted
 when the host has no library. The page calls them on its own origin by default:
 
 | Page route | Meaning |
 |---|---|
+| `GET/POST /api/usd-preview/objstore/config` | the saved connection: read its non-secret half, or `{ "action": "save" \| "clear" }` |
 | `GET /usd-asset-api/list?prefix=` | immediate children of one prefix |
 | `GET /usd-asset-api/search?prefix=&q=&usd=1&limit=200` | recursive file search below one prefix |
 | `GET /usd-asset/<key>` | one object's bytes (Preview's root read and the relative-reference reader) |
@@ -516,7 +680,7 @@ clicking a prim in the viewport — or picking one in the tree — fills it in. 
 |---|---|
 | Header | the prim path, its declared **type** (`Mesh`), its **kind**, and whether it is a `def` / `over` / `class` |
 | Applied schemas | every `apiSchemas` entry, including namespaced ones (`PhysicsDriveAPI:angular`) |
-| Composition | authored `inherits` / `specializes`, declared variant sets, `doc`, and the layers that described the prim |
+| Composition | the complete LIVRPS set — `references` and payloads with the prim each composes and the layer each resolved to (an arc the stage never composed is stated), authored `inherits` / `specializes`, declared variant sets with their variant names, the authored variant selection, and each layer's provenance: the arc (root / sublayer / reference / payload) it was reached through |
 | Attributes | a **`type` · `name` · value** table, grouped Transform / Geometry / Physics / Materials / Other, with `custom` and `uniform` shown beside the name, and — on a multi-layer stage — the layer each value was taken from |
 | Relationships | authored relationships (`material:binding`, `physics:body0`, …) with their resolved target paths |
 
@@ -534,6 +698,17 @@ is looked for at the path that layer wrote, and the header names both (`/root/un
 `/root/body` authored). Sublayers compose at the same path and are simply added to the describing
 layers. Without that walk every referenced asset answered "no layer describes that prim".
 
+Every arc kind is read back, not only the two that move a path: a reference or a payload row states
+the `@asset@</prim>` as authored, the prim it composes and the layer it resolved to; inherit and
+specialize paths are listed; a variant set shows the variant names it declares and the selection the
+prim authors (if the layer spells them); and the layers section annotates each describing layer with
+the arc that reached it. Both containers are covered — the ASCII reader keeps the arcs it already
+scans, and the crate reader decodes the list-op value types three's parser skips (`references`,
+`payload`, `inheritPaths`, `specializes`, `variantSetNames`, `subLayers`) directly from the crate
+field table. A crate whose path table cannot be trusted is reported as unreadable rather than shown as
+wrong declarations, and the inlined `double3` / `point3f` crate values are decoded to their real
+components instead of their raw 32-bit payload.
+
 Two rules keep it honest on a large stage. A **long array is counted, not materialised**: the panel
 reports `point3f[482]` and a preview of its first elements, deriving the count from the array's
 punctuation rather than from its values, so a solved robot's ~90 MiB geometry layer costs one
@@ -542,12 +717,68 @@ empty table. The three fallback composes no layer map, so it says the declaratio
 back instead of guessing.
 
 `src/client/layer-text.js` is the reader both this panel and the articulation read-back use — one
-lexer for one grammar, so the two can never disagree about the same file. `src/client/details.js`
-adds the crate path (three's `USDCParser` already decodes the field set; the details reader keeps the
-per-attribute `typeName` / `variability` / `custom` it discards) and the presentation rules.
+lexer for one grammar, so the two can never disagree about the same file. It also keeps what a
+composition reader needs: the prim's arcs (references, payload, inherits, specializes), the declared
+variant sets with their variant names, and the authored `variants` selection map. `src/client/details.js`
+adds the crate path (three's `USDCParser` decodes the field set; the details reader keeps the
+per-attribute `typeName` / `variability` / `custom` it discards and reads the list-ops it skips), the
+complete-arc assembly, and the presentation rules.
 [`docs/screenshots/details-panel.png`](docs/screenshots/details-panel.png) is the captured panel, and
 [`docs/screenshots/details-referenced.png`](docs/screenshots/details-referenced.png) is the same panel on a
 prim a reference composed.
+
+## Composition
+
+The toolbar's **Composition** button answers the stage-level question the prim tree and the details
+panel cannot: *where did this stage come from?* It opens a modal over the viewport listing every layer
+the assembly kept, indented by arc depth, with the arc that placed it there:
+
+- the **root layer** the user opened, with its authored `defaultPrim`, `upAxis`, `metersPerUnit`,
+  time range and prim count;
+- its **sublayers**, each a child of the layer that lists it;
+- every prim **reference** and **payload**, as a child node carrying the prim that declared it and the
+  authored `</prim>` path when the arc names one;
+- an arc whose target layer the stage never composed is listed **unresolved** ("not composed by this
+  stage") instead of being dropped, and an arc that closes a **cycle** stops the walk and says so;
+- layers the composition kept without any arc — an engine alias, a package member, a texture the
+  loader registered — are listed under **Sources with no arc**, and a container that could not be
+  decoded is a node with its reason instead of a silently empty row.
+
+The header counts layers / arcs / unresolved arcs. The walk is bounded (200 nodes, depth 8, 64
+children per node) and the panel states the clipping rather than pretending the tree ended. Nothing is
+composed here: the engine already did that, and this reads the same layer bytes back to name the arcs
+— a text layer and a crate are described alike, because the crate reader decodes the list-ops three's
+parser skips. A stage the three fallback composed kept no layer map, and the panel says so.
+[`docs/screenshots/composition-panel.png`](docs/screenshots/composition-panel.png) is the layer stack of
+`arcs/root.usda`, and [`composition-payload.png`](docs/screenshots/composition-payload.png) shows the
+payload case.
+
+## Text mode
+
+The **Text** button replaces the viewport with the layer's own text. That is a different reading of the
+same bytes the assembly kept — not of the drawn graph — and it is what a USD author debugs against: the
+brace that does not close, the exporter's array, the `prepend references` line that explains a value.
+
+- A `.usda` layer is shown **verbatim** (UTF-8 BOM stripped) with line numbers, monospace type, a wrap
+  toggle and a copy button; a small lexer colours comments, quoted strings, `@asset@` paths, numbers
+  and USDA keywords. Strings with escapes and a `#` inside a quote or an asset path are tokenised
+  correctly — concatenating the rendered tokens reproduces the line exactly.
+- A `.usdc` layer holds no authored text, so the panel shows a **clearly labelled reconstruction**:
+  the USDA rendering `src/client/usda-text.js` builds from the same decoded records Prim details uses
+  (attributes are re-serialised with their declared types, arcs, variant selections and metadata are
+  re-emitted; long arrays are abbreviated to their first elements and the header comment says so). It
+  is presented as a reconstruction, never as the authored source.
+- A `.usdz` package opens as a package state (its layers live inside the archive); a container the
+  reader cannot decode keeps its binary state and the reason.
+
+The layer picker lists the layers the assembly kept, the opened file first; bytes are read **when a
+layer is picked**, so opening Text on a stage whose geometry layer is ~90 MiB does not read it at all
+unless it is selected. Display is bounded by construction: at most 2 MiB decoded, 4 000 lines, and
+2 000 characters per line (a 90 MB one-line `point3f[]` array otherwise freezes the tab), with the
+omission stated in the panel — "the first part", never "all of it".
+[`docs/screenshots/text-mode.png`](docs/screenshots/text-mode.png) is an authored layer, and
+[`text-mode-crate.png`](docs/screenshots/text-mode-crate.png) the labelled reconstruction of
+`sample.usdc`.
 
 ## Build and install
 
@@ -557,7 +788,7 @@ Requires **Node ≥ 20** and npm.
 npm install            # three, esbuild, react, react-dom, @huggingface/usd-web-viewer, web-ifc
 npm run build          # 1) embeds the worker + wasm into src/client/engine-assets.generated.js
                        # 2) writes lib/index.js and lib/client.js
-npm test               # objstore + update + instancer + register + drop + prim-tree + selection + details + parse + s3 + articulation + studio + drop-ifc-render + articulation-render + render
+npm test               # objstore + update + instancer + register + drop + prim-tree + selection + details + composition + text-view + usda-text + parse + s3 + config + revisions + articulation + studio + drop-ifc-render + objstore-render + articulation-render + render
 npm run update:local   # update this checkout from its upstream and rebuild (see below)
 node tests/probe.mjs arcs/root.usda    # optional: print engine/stats/warnings for one file
 ```
@@ -670,20 +901,28 @@ terminal update plus a host restart, because the route is itself part of the new
 | `register` | evaluates `lib/client.js` under the shell's `window.__ModuleLoader__` contract in Node: registration id, `apply`/`inject`, **the only external module requested is react**, the definition id equals the body key, and the injected `readLayer` really goes through the workspace Remote |
 | `instancer` | the custom-type rewrite in isolation: a prim whose **own** fields carry `protoIndices` and `prototypes`/`positions` is promoted, a custom group around an instancer is not, and a prim with only part of the signature stays untouched — the container case is what protects a nested custom-instancer library |
 | `drop` | the external-asset path without a browser: name/key helpers, **the model candidates and the auto-open rule across both formats** (`usd` before `ifc` at one depth), BOM + custom-instancer normalisation of a dropped text layer, package bytes passed through untouched, an IFC model handed over unrewritten, picker collection, and the capture-phase sidebar listener against a faked document (USD and IFC drags claimed + highlighted, PDF drag left to the shell, drop handed to the page tab, listeners removed on dispose) |
+| `session` | the modeling-session archive reader without a browser: the one file name it claims, 20-digit revision ranking (numeric, not lexical; directories and temp files skipped), the manifest's four fields read tolerantly (snake/camelCase, missing ones named, invalid JSON and other objects refused), the newest commit's object summary (a `summary.objects` list, one object's counts, a top-level list, or just `object_ids`; a partial count reported as unknown instead of summed), and archive resolution through a fake source: the newest snapshot chosen and its bytes returned, an older archive without `snapshots/`, an empty and an unreadable folder, a corrupt commit record, a record revision mismatch, a snapshot that lags or leads the commit, a missing commit folder, missing manifest fields, and the dropped-folder key prefix carried into the snapshot path |
 | `drop-ifc-render` | **real Chromium + WebGL**: the real `UsdDropBody` mounts a pending drop, so the path from "the sidebar handed over files" to "a lit model" is production code — a dropped `.ifc` reaches the IFC reader (schema, element count, measured extent, non-flat frame) rather than the USD body, a two-model drop opens its picker and reads the chosen one, a drop with no model says so, and a file merely named `.ifc` reaches the failure state instead of hanging |
 | `prim-tree` | the prim-path hierarchy in isolation: natural numeric ordering, tree building with copyable ancestor folders, ancestor-preserving filtering, bounded flattening with an honest total, and picked-path ancestor reveal |
-| `details` | the prim-details reader in isolation, no browser: declared types (`point3f[]`, `int[]`, `token`, never a JavaScript type), `custom` / `uniform` modifiers, `kind` and `apiSchemas`, relationships with resolved targets, **ASCII and crate agreeing on every attribute of the same stage**, a long array summarised by its true element count instead of materialised (and counted as elements, not components), a declared-but-unset attribute keeping its type, **a prim a `references` arc re-roots found under its composed path with its authored path reported**, a `subLayers` layer contributing at the same path, a UTF-8 BOM staying a text layer, the no-layer-bytes / no-such-prim answers staying distinct, and the panel's ordering and value-formatting rules |
+| `details` | the prim-details reader in isolation, no browser: declared types (`point3f[]`, `int[]`, `token`, never a JavaScript type), `custom` / `uniform` modifiers, `kind` and `apiSchemas`, relationships with resolved targets, **ASCII and crate agreeing on every attribute of the same stage**, a long array summarised by its true element count instead of materialised (and counted as elements, not components), a declared-but-unset attribute keeping its type, **a prim a `references` arc re-roots found under its composed path with its authored path reported**, a `subLayers` layer contributing at the same path, a UTF-8 BOM staying a text layer, the no-layer-bytes / no-such-prim answers staying distinct, the panel's ordering and value-formatting rules, and **the complete LIVRPS arcs**: references and payloads with their authored prim path, resolved layer and composed prim (an unresolved arc states so), inherits/specializes, variant sets with declared variant names and the authored selection, each describing layer carrying the arc it was reached through, the same arcs decoded from a crate aliasing an ASCII fixture, an inlined crate vector decoded to its components, a package source reported as an unreadable layer, and a layer whose crate path table cannot be trusted reported instead of shown |
+| `composition` | the stage composition reader, no browser: sublayers, references and payloads become child nodes in arc order with the prim that declared each one, a crate composes the same tree as its ASCII twin, an arc to a layer the stage does not hold is counted unresolved and invents nothing, the caller-named root wins over map order, the engine's alias keys for one blob collapse to one layer while two blobs with identical bytes stay two, an unreached source is stated, a cycle stops the walk, a chain past the depth bound is clipped with the truncation stated, and an undecodable container is a node with its reason |
+| `text-view` | the authored-text model in isolation, no browser: container classification from bytes (BOM-prefixed ASCII, crate, zip package, unknown — never from a file name), BOM stripping, the byte-budget cut on a line boundary, the line cap, overlong-line trimming with its count, the full file's line total counted without materialising it, the binary/package descriptors, the package reader on a real `.usdz` and on in-memory zips (only USD layers kept, archive order, budget/entry omission), the per-line USDA lexer (comments, quoted strings with escapes, `@asset@` paths, keywords, numbers, punctuation) including the exact-reconstruction invariant on tricky and random lines, and the line model's numbering/cap |
+| `usda-text` | the USDA serialiser in isolation: decode `tests/fixtures/sample.usda` with the layer reader, render it, re-read the rendered text and compare prim paths, types, specifiers, API schemas, attribute names/declared types/custom/uniform flags, relationship targets, layer metadata and spot values; hierarchy and over/class; quoting and escapes for strings/tokens/assets; declared-only attributes; crate-shaped flat typed arrays regrouped into tuples; composition arcs and variant selections round-tripped through the reader; empty and metadata-less layers; and the output character bound with its truncation marker |
 | `selection` | the selection highlight in isolation, no browser: one tint copy parented to the picked mesh and sharing its geometry (so a joint carries it and no vertex is duplicated), the copy refusing to be raycast, one placement of an instanced batch tinted rather than the batch, groups/points/lines refused instead of invented, the wireframe mode reaching a tint created after it, the source's face policy mirrored onto the tint both ways (`DoubleSide` kept, `FrontSide` taken back off the shared material), and `dispose()` releasing only its own material — never the caller's geometry |
 | `parse` | magic-number dispatch for all four containers; **ASCII and crate must produce the same geometry** (2 meshes / 972 triangles / identical extent); a reference chain assembles when given a reader and stays honestly empty without one; address and path helpers |
 | `ifc` | the IFC container and structure helpers, **no browser and no WASM**: the registry definition (a STEP file stays text-readable, only `.ifczip` is binary, no suffix claimed twice), container detection from the leading bytes (STEP prologue, BOM tolerated, zip signatures, and a `.ifc`-named non-STEP file correctly rejected), `FILE_SCHEMA` parsing, the IFCZIP root rule, unit labels (`MILLI`+`METRE` → `mm`, and no unit line for a metre model), path segments that survive a slash or a control character in a name, sibling disambiguation by express ID, and **the flat worker structure turned into a tree** — including the case the committed fixture caught: an `IfcProject` is an `IfcObjectDefinition` but not an `IfcProduct`, so a walk from products alone loses the whole site/building/storey chain |
 | `articulation` | joint read-back and kinematics, **no browser needed**: authored joint fixtures (door / drawer / three-link chain / fixed-only / mixed / no physics) go through `readArticulation`; an ASCII↔crate parity fixture (`mixed.usdc`, inlined `Vec3d` decoding) and a referenced-asset fixture (composed paths matched under `/World/Robot`, lookalikes stay static) pin the binary-container and composition cases; the controller is validated on a synthetic scene (world matrices unchanged before/after binding, travel inside the limits, home to 1e-6, picking hits the right joint and ignores fixed joints, collider toggle, dispose restores); diagnostics are reported to the caller |
-| `s3` | host-side asset-library logic offline: environment-only configuration (including `DSH_USD_S3_ROOT_PREFIX` normalization and confinement — siblings and `..` refused, not clamped), `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, `ListObjectsV2` parsing (folders from `CommonPrefixes`, XML entities, continuation tokens), recursive search, a listing signature verified against an independent SigV4 derivation, and the asset/health/list/search routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
+| `s3` | host-side asset-library logic offline: environment configuration (including `DSH_USD_S3_ROOT_PREFIX` normalization and confinement — siblings and `..` refused, not clamped), `keyOf` validation, SigV4 request shape, bounded memory/disk cache, 404, 413 and generic 502 semantics, `ListObjectsV2` parsing (folders from `CommonPrefixes`, XML entities, continuation tokens), recursive search, a listing signature verified against an independent SigV4 derivation, and the asset/health/list/search routes mounted through the Connection Fetch-route surface (the fake offers no raw webserver) — no network and no real credentials |
+| `config` | the connection the sidebar saves, offline: endpoint/bucket/key validation with stable error codes, a blank secret keeping the stored one, the file written `0600` through a temporary file under a temporary `DSH_HOME`, malformed and half-written files reading as "nothing configured", idempotent clear, the probe (a signed `ListObjectsV2`; 403/404/5xx/network mapped), and the route itself — verify-then-write (a refused listing writes nothing), the secret and every local path kept out of the response, health switching to the saved library, `clear` removing it, and `409 environment-config` while `DSH_USD_S3_*` names a library |
+| `revisions` | the revision-path helpers in isolation: the `revisions/<id>` pair found only as a segment pair (`revisions.usda` and a bare `revisions/` folder are not revisions), directory/id/remainder, first pair only, short keys that keep a trailing slash and are idempotent, revision folders, and collapsing a listing so the newest revision of one object wins while a plain (non-revision) entry always beats a revision of the same object |
 | `directS3` | the browser-direct S3 backend offline: endpoint/prefix normalization and root confinement (siblings and `..` refused), validation and the non-secret config (a secret never serializes), `s3://`/http URLs, `ListObjectsV2` parsing (folders from `CommonPrefixes`, XML entities, continuation tokens), recursive search, object bytes, and a Web Crypto SIGV4 signature verified against an independent derivation |
-| `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, backend selection (a configured host bypasses the gateway; an unconfigured one falls back to it), public URLs derived from the host endpoint, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes) |
+| `objstore` | the object-storage page's client contract without a browser: key encoding/USD detection/formatting, list+search URL building, the 10 s request cache (a shared request outlives one caller's abort and is reused), bucket-correct `s3://` URIs, backend selection (a configured host bypasses the gateway; an unconfigured one falls back to it), public URLs derived from the host endpoint, and the address-open descriptor — `s3://`/http(s) root bytes plus readers, host-route and gateway fallbacks, and the error mapping (bad URI, 404, malformed escapes), plus the saved-connection client: read/save/clear, every field reaching the route, a missing route reported as unsupported, the 400/409/502 reason mapping, and the cache reset that makes the next listing ask the new backend |
 | `update` | the local-checkout updater offline: ahead/behind parsing, dirty/detached/not-a-checkout refusals, check/update/restart actions, the single-update lock, restart command construction, a **real local-git integration** (bare origin + clone: fast-forward, package.json-aware install skip, rebuild, host-change detection, idempotent rerun), and the update route's GET/POST registration with malformed-body/unknown-action refusal |
 | `studio` | **real Chromium + WebGL**: mounts `createView` and asserts neutral tone mapping, sRGB, PCF shadows, PMREM environment, four rect lights, the lit ground disc, the on-demand frame rhythm (no continuous rAF — at most a settling frame while idle), aspect-aware framing in both landscape and portrait stages, that a throwing frame observer stops the loop instead of hot-looping, and the selection highlight: one copy at the picked mesh's world position, its pixels visibly shifted towards the accent, and clearing it returning the frame to the unselected image |
 | `articulation-render` | **real Chromium + WebGL**: `UsdBody` mounts an articulated fixture, then clicks are resolved against the rendered pixels (only a click that changes the canvas counts): toggling a part changes the frame and selects the part, Home restores it, the tint travels with the part it marks, Escape and a background click deselect, colliders add their overlay, and idle draws nothing |
-| `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame, stay pickable, and the stats must name the OpenUSD (WASM) engine; a prim-panel case checks the path list, its filter and that a canvas click names the picked prim. Screenshots land in `tests/.artifacts/` |
+| `render` | **real Chromium + WebGL**: `UsdBody` mounted with real props (including both injected readers) over the committed fixtures — package, ASCII, crate, reference chain, **sublayer + reference**, instancer, nested instancer, custom-typed instancer, **custom nested instancer**, **custom instancer behind a payload**, articulated fixture — each must draw a non-flat frame, stay pickable, and the stats must name the OpenUSD (WASM) engine; a prim-panel case checks the path list, its filter and that a canvas click names the picked prim, and the **read-back modes** are exercised end to end: the Text toggle renders real lines whose text contains the USDA header (an ASCII source or a crate reconstruction, decided by the file), and the Composition modal names the root layer, its sublayer and its reference arcs on the fixture that has them. Screenshots land in `tests/.artifacts/` |
+| `session-render` | **real Chromium + WebGL**: `SessionBody` mounted over the committed archive fixture, both ways in — for a `session.json` address (workspace readers) and as a dropped folder (file table only, no Session): the **newest** snapshot (rev 2, two meshes) composes through the OpenUSD engine into a non-flat frame (the rev-1 snapshot has one mesh, so the stats line proves the revision choice), the panel names the session id, `model_rev` and the newest commit's object summary, and an older archive without `snapshots/` shows its panel and states the missing folder instead of failing. Screenshots land in `tests/.artifacts/` |
+| `objstore-render` | **real Chromium + WebGL**: the object-storage page mounted against a stubbed host half (no storage, no credentials) — the connection status line (bucket, endpoint, root prefix) with the old credential disclaimer gone, the directory surviving an unmount/remount instead of returning to the root, the short-path default hiding the `revisions` folder, *Version path* revealing both revisions, a recursive search collapsing to the newest revision with its short path and `#revision` chip (the older revision never listed), and the connection form: labelled fields, a stored secret offered only as a placeholder, `Disconnect` posting `{"action":"clear"}`. Screenshots land in `tests/.artifacts/` |
 | `ifc-render` | **real Chromium + WebGL**: `IfcBody` mounts the committed IFC fixtures and the whole pipeline is production code — the worker boot, the gzip inflation, web-ifc, the graph. Each case must draw a non-flat frame (a thousand-plus distinct colours), report its schema and its measured extent, and list its spatial tree. Two assertions carry most of the weight: the **size** (`5.000 × 3.000 × 0.200` for a wall the file authors in millimetres, `8.000 × 6.600 × 6.000` for the two-storey building) proves the placement matrix was applied exactly once — a second Z-up→Y-up rotation lays the model on its side, which is how that bug was found; and the **details panel** proves a property set reaches the element through `IfcRelDefinesByProperties` with its declared `IFCBOOLEAN` type, and that a wall carrying a void is both foldable and selectable |
 
 The browser suites need Playwright + Chromium. Without a browser they print `SKIP`, and `npm test`
@@ -712,11 +951,19 @@ Fixtures: `tests/fixtures/sample.{usda,usd,usdc,usdz}` are four containers of on
 exported by Blender (`tests/make-fixtures.py` regenerates them); `refs/unit.usda →
 refs/geom/body.usda` is a reference chain; `arcs/root.usda → sub/base.usda + ref/body.usda`
 is a sublayer + reference combination that three's composer cannot do at all;
+`arcs/full.usda` / `arcs/full.usdc` author every LIVRPS arc at once (two sublayers, two references —
+one naming a prim — a payload, inherits, specializes, two declared variant sets with variants and an
+authored selection) and the crate is the same stage in a binary container, so the details and
+composition suites can pin ASCII/crate parity;
 `joints/*.usda` are hand-authored `UsdPhysics` stages; `instancer/custom-nested.usda`
 is a custom-typed instancer library whose prototypes are custom instancers reached
 through external prim paths; `instancer/payload/root.usda` is the same shape with
 the inner instancer and its prototype inside a payload layer (2 layers, 4 quads);
 `remote/root.usda` is an object-storage reference example.
+`session/` is a modeling-session archive fixture in the archive writer's own JSON shape (manifest,
+two commit records and two snapshots — rev 1 draws one mesh, rev 2 two, so the newest-snapshot
+choice is visible in the stats line) and `session-nosnap/` is the shape an archive had before
+snapshot export.
 
 The IFC fixtures are hand-authored STEP files, so the suite needs no exporter and no CAD
 toolchain: `ifc/hello-wall.ifc` is one wall (5 × 3 × 0.2 m, authored in millimetres);
@@ -794,6 +1041,18 @@ geometries / 180 triangles, 8 × 6.6 × 6 m); `ifc/not-ifc.ifc` is plain prose b
   `payload` and `subLayers` far enough to find the layer that authored a composed prim (see *Prim
   details* above), but it does not re-compose what it finds there. The three fallback keeps no layer
   map and reports that instead of showing nothing.
+- **The composition tree is a read-back too, and it is bounded.** It names the layers the assembly kept
+  and the arcs the layers declare; it does not prove the engine enacted every arc, evaluate variants, or
+  list a package's members. The walk is capped (200 nodes, depth 8, 64 children per node) and the panel
+  states the clipping. A crate whose path table decodes shifted — three's parser can mis-count encoded
+  paths for crates carrying variant contents — is reported as unreadable rather than shown as wrong
+  arcs; the WASM composition of that same file is unaffected.
+- **Text mode shows a layer's text, not a flattened stage.** A `.usda` layer is its authored source; a
+  binary crate has no text, so its text view is a **labelled reconstruction** from the decoded records
+  (long arrays abbreviated), and a `.usdz` package's internal layers are not expanded. A stage the three
+  fallback composed exposes only the opened layer's bytes; the layers the engine read are listed only
+  when the assembly kept them. The reader bounds what it decodes (2 MiB / 4 000 lines / 2 000 characters
+  per line) and says what it omitted, so a multi-megabyte layer is previewed rather than materialised.
 - **One read per referenced layer, byte-windowed above the Host cap.** The Host refuses a
   complete read above `workspaceFiles.maxFileBytes` (default 32 MiB) and one window above
   `maxBytes` (default 2 MiB). The reader asks for the complete layer first and, when the Host
@@ -827,29 +1086,59 @@ geometries / 180 triangles, 8 × 6.6 × 6 m); `ifc/not-ifc.ifc` is plain prose b
   address carries no Session, so the engine can compose the opened layer and its `s3://`
   payloads but relative workspace references stay missing (and appear as warnings). Files
   opened through a Session address keep their workspace reader.
-- **Object storage needs explicit configuration** (see above): environment-only, path-style,
-  no STS session tokens, read-only, and crate-internal absolute `s3://` references need the
-  opt-in crate patcher.
+- **Object storage needs explicit configuration** (see above): a saved connection or
+  `DSH_USD_S3_*`, path-style addressing, no STS session tokens, a read-only bucket (the one file
+  this plugin writes is its own connection document under `DSH_HOME`), and crate-internal absolute
+  `s3://` references need the opt-in crate patcher.
 - **The engine transport patch is version-coupled.** The build rewrites one function of
   `@huggingface/usd-web-viewer`; upgrading the engine may require updating the anchor in
   `build.mjs` (the build fails loudly when it does).
+
+### Modeling sessions
+
+- **Only the newest snapshot is drawn.** The archive is previewed as its current state: the panel
+  names the revision and any snapshot/commit mismatch, but there is no revision picker, no live
+  follow of a running session, and no `renders/` viewer (the M2 named-view output).
+- **The archive must be inside the workspace, or dropped.** The tab type claims Session-scoped
+  file addresses only: the Host's directory listing is workspace-scoped, so without a Session the
+  newest snapshot's name cannot be learned and an absolute-address `session.json` is simply not
+  previewed as an archive. Dropping the folder avoids the restriction because the drop's file
+  table is already a directory listing.
+- **`events.jsonl` is not read.** Diagnostics the runner logged there are not surfaced; the
+  preview reads `session.json`, `commits/` and `snapshots/` only.
+- **The tab is a resource tab, not a document-preview implementation.** The document-preview
+  registry matches by suffix, so it cannot select the exact file name `session.json` without
+  claiming every JSON file; the sidebar tab type is what makes the one name selectable. The
+  consequence is that the generic document toolbar (viewer switcher, wrap, reload) is not drawn
+  for this tab — the session panel and the USD viewport's own toolbar are.
+- **Another tool's `session.json` is claimed too.** A workspace file that merely shares the name
+  shows a clear "not a modeling-session archive" message rather than the Code viewer: a glob match
+  has no content veto. (It names the manifest fields the file lacked, so the reason is visible.)
+- **A commit summary is what the record states, not a re-measurement.** The panel reports the
+  newest record's counts; it does not open the snapshot and count its prims, so a record written
+  by an older build can disagree with what is drawn without the preview noticing.
 
 ## Scope
 
 This plugin reads **local bytes only** — workspace files through the host's Remote, and files
 the user drops on the sidebar through the browser's own file API — plus, when explicitly
-configured through `DSH_USD_S3_*` environment variables, **read-only objects from an
-S3-compatible object storage**. It mounts previews for six file extensions
-(`.usd`/`.usda`/`.usdc`/`.usdz` and `.ifc`/`.ifczip`), one drop entry for those six, and
-nothing else: no uploads, no workspace writes, no credentials stored in the package, and no
-configuration files.
+configured through `DSH_USD_S3_*` environment variables or saved from the object-storage tab,
+**read-only objects from an S3-compatible object storage**. It mounts previews for six file
+extensions (`.usd`/`.usda`/`.usdc`/`.usdz` and `.ifc`/`.ifczip`), previews a
+modeling-session archive through its `session.json` (a sidebar tab type; no suffix is claimed
+from the document-preview registry), offers one drop entry for all of those, and reads nothing
+else: no uploads, no workspace writes, and no credentials in the package. The one
+document it writes is the connection the object-storage tab saves
+(`$DSH_HOME/usd-3d-preview/object-store.json`, mode `0600`), and only after that connection has
+answered a signed listing.
 
 Both engines run in the browser: the USD stage is composed by a WebAssembly OpenUSD, and the IFC
 model is parsed by a WebAssembly web-ifc. Neither sends the file anywhere, and the IFC reader
 needs no host route at all — a model is one self-contained STEP file.
 
 Its host routes are all owner-only exact Fetch routes on the authenticated `/api` channel: the
-read-only asset and health routes above, and the local-update route. The update route is the one
+read-only asset, health, listing and search routes above, the saved-connection route (the only one
+that writes a file) and the local-update route. The update route is the one
 route that mutates the installation rather than reading data: on an explicit click it
 fast-forwards this plugin's own checkout from its configured upstream (a network fetch of that
 git remote), installs dependencies when `package.json` changed, and rebuilds `lib/`. It refuses
@@ -876,6 +1165,16 @@ MIT — see [LICENSE](LICENSE).
 以及该 prim 来自哪些图层（多层时逐条属性标注取值来自哪一层）；被 `references` / `payload` 重新挂载的
 prim 会按图层里真实书写的路径回读，并同时标出组合后的路径与原路径；超长数组只报元素个数与前几项
 （`point3f[482] (…)`），因此读取大资产的几何图层也是一次分隔符扫描，不会把整层解析进内存。
+「详情」面板还完整列出该 prim 的 LIVRPS 组合弧：references / payload（含其组合到的图层与 prim，未解析的弧会
+直接写明）、inherits / specializes、变体集及其变体名与当前选择，并标注每个描述图层是通过哪条弧到达的；
+ASCII 与 crate 两种容器都覆盖（crate 里 three 解析器跳过的 list-op 由读取器直接从字段表解码），路径表
+不可信的 crate 会报「无法回读」而不是给出错误声明。
+工具栏另有「组合」与「文本」两种回读模式：「组合」弹窗按弧展开整个图层栈（根图层、子图层、references、
+payload、未解析弧与循环引用），给出每个图层的来源弧、容器与 prim 数，结构过大时说明截断；「文本」把视口
+切换为该图层自身的文本——`.usda` 原样显示（去 BOM、行号、等宽、自动换行、复制、按语义着色），`.usdc`
+没有原始文本，因此显示**明确标注的重建** USDA（含弧、变体选择与元数据；超长数组截断并注明，绝不冒充原文）；
+`.usdz` 包显示「图层在压缩包内」。图层字节按需读取，单次显示上限 2 MiB / 4000 行 / 每行 2000 字符并注明
+省略，因此大资产不会卡住页面。
 外部资产（桌面上的文件或文件夹）可以直接拖到右侧边栏打开：侧边栏「开始」页有「三维预览」
 入口卡片，拖拽落在侧边栏面板上即会打开预览标签页，文件夹会连同被引用的图层和贴图一起读取；
 `.ifc` / `.ifczip` 走同一个入口，由页面直接读取模型字节并挂载同一个 IFC 视口（与 Files 标签
@@ -891,8 +1190,18 @@ prim 会按图层里真实书写的路径回读，并同时标出组合后的路
 面板按属性集列出该构件的 `IfcPropertySet` / `IfcElementQuantity`，每条属性带它的 IFC 值类型
 （`IFCBOOLEAN` / `IFCREAL` / `IFCLABEL`…）。表面颜色取自 `IfcSurfaceStyle` 的 `IfcColourRgb`，
 按颜色共享材质；没有样式的模型用中性灰而不是纯黑。
-可选支持 `s3://` 对象存储引用：由宿主半边用 `DSH_USD_S3_*` 环境变量配置的凭据做只读 SigV4
-签名读取，浏览器侧把 ASCII 图层的 `s3://` 引用本地化到引擎包键后组合。构建：
+**建模会话归档**：人工+agent 交互建模会话把会话写成目录（`session.json` + `commits/<20 位修订>.json`
++ `snapshots/<20 位修订>.usda`）。在 Files 里打开 `session.json`，或把归档文件夹拖进侧边栏，
+就会用同一个 USD 视口绘制**最新**的快照，并在顶部小面板显示 session_id、`model_rev`（最新提交记录）
+与最新提交里的对象摘要（对象数、面/边/顶点、流形、体积）。没有 `snapshots/` 的旧归档、空目录、
+无法读取的目录、损坏的提交记录、记录修订号与文件名不一致、快照落后或超前于最新提交，都只显示为
+提示而不会让预览失败；快照与提交记录都经工作区 Remote 或拖入的文件表读取，没有新增宿主路由。
+为避免抢走其他 JSON 文件的查看器，它按**文件名**注册为侧边栏标签类型（`session.json` /
+`*.session.json`），而不是按后缀的文档预览。
+可选支持 `s3://` 对象存储引用：由宿主半边用 `DSH_USD_S3_*` 环境变量（或侧边栏「对象存储」页保存
+在本机配置文件里的连接）做只读 SigV4 签名读取，浏览器侧把 ASCII 图层的 `s3://` 引用本地化到引擎包键后
+组合。对象存储页记住上次所在目录（切换标签页不会退回根目录），版本化资产（`<asset>/revisions/<id>/…`）
+默认按短路径展示、只显示最新版本，工具栏可在「短路径 / 版本路径」之间切换。构建：
 `npm install && npm run build && npm test`。本地 checkout 可用 `npm run update:local`（或 Web UI 的
 Settings → Plugins「插件更新」页 / 插件详情页）一键更新：快进上游、按需安装依赖、重建 `lib/`；
 若 `lib/index.js` 变化则重启宿主，其余情况客户端 bundle 由 HMR 自动热加载。

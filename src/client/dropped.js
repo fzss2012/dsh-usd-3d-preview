@@ -18,6 +18,7 @@
  */
 import { retypeCustomInstancers, stripBom } from './engine.js'
 import { isIfcName } from './ifc.js'
+import { isSessionArchiveName } from './session.js'
 import { USD_EXTENSIONS } from './usd.js'
 
 /** Suffixes this preview opens. */
@@ -43,21 +44,24 @@ export function isUsdName(name) {
  * Whether one file name is a model this preview opens by bytes.
  *
  * A USD layer is composed from the files beside it; an IFC model is read whole
- * from its one file. Both reach the page the same way, so the drop offers both
- * and the page tab decides which reader opens the one that was chosen.
+ * from its one file; a `session.json` names a modeling-session archive whose
+ * newest snapshot is composed from the folder beside it. All three reach the
+ * page the same way, so the drop offers them and the page tab decides which
+ * reader opens the one that was chosen.
  * @param name - a dropped file's name, with or without its directory.
- * @returns true for a USD layer or an IFC model, in any case.
+ * @returns true for a USD layer, an IFC model or a session archive manifest, in any case.
  */
 export function isModelName(name) {
-  return isUsdName(name) || isIfcName(name)
+  return isUsdName(name) || isIfcName(name) || isSessionArchiveName(name)
 }
 
 /**
  * Which reader opens a dropped key.
  * @param key - a dropped file's package-relative key.
- * @returns `ifc` for a model, `usd` for a layer.
+ * @returns `session` for an archive manifest, `ifc` for a model, `usd` for a layer.
  */
 export function modelKindOf(key) {
+  if (isSessionArchiveName(key)) return 'session'
   return isIfcName(key) ? 'ifc' : 'usd'
 }
 
@@ -81,15 +85,19 @@ function depthOf(key) {
   return key.split('/').length
 }
 
+/** Ordering of the three readers when a drop carries several kinds at one depth. */
+const KIND_ORDER = { session: 0, usd: 1, ifc: 2 }
+
 /**
  * The models a drop can open, shallowest first.
  *
  * A folder that holds one root layer next to the layers it references (the
  * usual SimReady/unit layout) yields the root first and the referenced layers
  * after it, while a folder with several independent items yields all of them in
- * a stable order for the picker. Two models at one depth keep USD before IFC,
- * because a mixed folder is a USD asset that happens to carry a model beside it
- * far more often than the reverse.
+ * a stable order for the picker. Two models at one depth keep the archive
+ * manifest first, then USD, then IFC: a session archive's `session.json` sits
+ * above the snapshot folder it describes, and a mixed folder is a USD asset far
+ * more often than the reverse.
  * @param files - collected files by key.
  * @returns the models, each with the reader that opens it, ordered by depth,
  * then kind, then name.
@@ -99,7 +107,7 @@ export function modelCandidates(files) {
     .filter(isModelName)
     .map(key => ({ key, kind: modelKindOf(key) }))
     .sort((left, right) => depthOf(left.key) - depthOf(right.key)
-      || (left.kind === right.kind ? 0 : left.kind === 'usd' ? -1 : 1)
+      || KIND_ORDER[left.kind] - KIND_ORDER[right.kind]
       || left.key.localeCompare(right.key))
 }
 
@@ -108,8 +116,10 @@ export function modelCandidates(files) {
  *
  * A folder that holds one model beside the layers it references needs no picker:
  * referenced layers sit deeper than the root, so the unique shallowest entry is
- * the one to open. Two models at that depth are two independent models, and the
- * page asks which one to open instead of guessing.
+ * the one to open — which is also why a session folder opens its `session.json`
+ * (the snapshots and records beneath it are never candidates of their own). Two
+ * models at that depth are two independent models, and the page asks which one
+ * to open instead of guessing.
  * @param models - candidates in the order {@link modelCandidates} produced.
  * @returns the key to open, or undefined when the drop needs a choice.
  */

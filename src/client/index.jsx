@@ -36,6 +36,8 @@ import { UsdBody } from './UsdBody.jsx'
 import { UsdObjectStoreBody } from './ObjStoreBody.jsx'
 import { en, zh } from './locales.js'
 import { offerDropped } from './dropped.js'
+import { isSessionArchiveName, SESSION_TAB_ID, SESSION_TAB_KIND, SESSION_TAB_PATTERNS } from './session.js'
+import { SessionTabBody } from './SessionBody.jsx'
 import { UsdUpdateBadge, UsdUpdateSection, UsdUpdateSettingsTab } from './UpdatePanel.jsx'
 import { UPDATE_DETAIL_BADGE_ID, UPDATE_DETAIL_SECTION_ID, UPDATE_SETTINGS_TAB_ID } from './update.js'
 import { IFC_PREVIEW_ID } from './ifc.js'
@@ -45,6 +47,7 @@ import {
   USD_OBJSTORE_TAB_ID,
   USD_OBJSTORE_TAB_KIND,
   USD_PREVIEW_ID,
+  usdFileName,
   USD_TAB_ID,
   USD_TAB_KIND,
   usdDefinition,
@@ -120,6 +123,55 @@ async function readInWindows(ctx, sessionId, path, signal) {
 }
 
 /**
+ * The readers a document body uses to reach files beside the one that was opened.
+ *
+ * All three go through the workspace Remote — the same door the Files tab uses —
+ * so a referenced USD layer, an archive snapshot and a directory listing resolve
+ * against the Session's own filesystem. The USD preview needs the first two; the
+ * session preview adds the lister, because the newest snapshot's name is decided
+ * by the folder's contents.
+ * @param ctx - the client root context carrying the workspace Remote.
+ * @returns the injected reader/listing functions.
+ */
+function workspaceReaders(ctx) {
+  const readLayer = async (sessionId, path, signal) => {
+    // The Client Remote answers with a result envelope, never by rejecting:
+    // the bytes live under `value`, and a failure is the honest "this layer
+    // does not exist", which the engine reports as a missing layer.
+    const result = await ctx.remote.workspaceFiles.readBytes(sessionId, path, {}, signal)
+    if (result.ok) return result.value.data
+    // A solved asset's geometry layer is commonly far above the Host's
+    // complete-read cap (default 32 MiB; a SimReady robot's is ~92 MiB).
+    // The Host still serves byte windows, so reassemble the layer instead
+    // of dropping it and composing an empty stage.
+    if (result.error?.code !== 'workspace-file/too-large') return undefined
+    return await readInWindows(ctx, sessionId, path, signal)
+  }
+  // `s3://…` references are served by the host half, which signs the read
+  // against the S3-compatible object storage configured through the
+  // DSH_USD_S3_* environment variables. The browser cannot sign, and an
+  // unsigned read of that bucket is a 403. The route is an exact Fetch route
+  // on the shared /api channel, so the same-origin session credential and
+  // the Host/Origin trust fence apply before the host signs anything.
+  const readAsset = async (uri, signal) => {
+    const response = await fetch(`/api/usd-preview/asset?uri=${encodeURIComponent(uri)}`, { signal })
+    if (!response.ok) return undefined
+    return new Uint8Array(await response.arrayBuffer())
+  }
+  // A listing failure is reported, not thrown: "no snapshots/ folder yet" is a
+  // normal older archive, and the body's message depends on telling that apart
+  // from an unreadable folder.
+  const listDirectory = async (sessionId, path, signal) => {
+    const remote = ctx.remote?.workspaceFiles
+    if (remote === undefined || typeof remote.list !== 'function') return { error: 'unsupported' }
+    const result = await remote.list(sessionId, path, signal)
+    if (result?.ok === true) return result.value
+    return { error: result?.error?.code ?? 'workspace-file/unknown' }
+  }
+  return { readLayer, readAsset, listDirectory }
+}
+
+/**
  * Client plugin body: register the dictionaries, the suffix metadata, both USD
  * entry points, the viewport, and the sibling-layer/asset readers.
  * @param ctx - the client root context carrying slots, copy, the preview
@@ -127,6 +179,7 @@ async function readInWindows(ctx, sessionId, path, signal) {
  */
 export function apply(ctx) {
   const t = ctx.locale.bind(NS)
+  const readers = workspaceReaders(ctx)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'usd-3d-preview: dictionaries')
 
   // ── workspace files: a document preview by address ─────────────────────────
@@ -140,32 +193,7 @@ export function apply(ctx) {
     locale: NS,
     // One complete file read per referenced layer; the body decides which paths
     // those are, because it is the half that knows the opened file's address.
-    inject: () => ({
-      readLayer: async (sessionId, path, signal) => {
-        // The Client Remote answers with a result envelope, never by rejecting:
-        // the bytes live under `value`, and a failure is the honest "this layer
-        // does not exist", which the engine reports as a missing layer.
-        const result = await ctx.remote.workspaceFiles.readBytes(sessionId, path, {}, signal)
-        if (result.ok) return result.value.data
-        // A solved asset's geometry layer is commonly far above the Host's
-        // complete-read cap (default 32 MiB; a SimReady robot's is ~92 MiB).
-        // The Host still serves byte windows, so reassemble the layer instead
-        // of dropping it and composing an empty stage.
-        if (result.error?.code !== 'workspace-file/too-large') return undefined
-        return await readInWindows(ctx, sessionId, path, signal)
-      },
-      // `s3://…` references are served by the host half, which signs the read
-      // against the S3-compatible object storage configured through the
-      // DSH_USD_S3_* environment variables. The browser cannot sign, and an
-      // unsigned read of that bucket is a 403. The route is an exact Fetch route
-      // on the shared /api channel, so the same-origin session credential and
-      // the Host/Origin trust fence apply before the host signs anything.
-      readAsset: async (uri, signal) => {
-        const response = await fetch(`/api/usd-preview/asset?uri=${encodeURIComponent(uri)}`, { signal })
-        if (!response.ok) return undefined
-        return new Uint8Array(await response.arrayBuffer())
-      },
-    }),
+    inject: () => ({ readLayer: readers.readLayer, readAsset: readers.readAsset }),
   }, UsdBody)), 'usd-3d-preview: document body')
 
   // ── IFC: a document preview by address ────────────────────────────────────
@@ -185,6 +213,37 @@ export function apply(ctx) {
     key: IFC_PREVIEW_ID,
     locale: NS,
   }, IfcBody)), 'usd-3d-preview: IFC document body')
+
+  // ── modeling sessions: a `session.json` archive opened by address ────────
+  // The document-preview registry cannot claim the exact file name
+  // `session.json`: it matches a declared suffix against `.<suffix>`, so
+  // declaring one would only match `foo.session.json`, and declaring `json`
+  // would take every other JSON file in the workspace. A sidebar tab type
+  // matches address globs instead, which selects this one name without claiming
+  // the rest. The body is the USD viewport fed the newest
+  // `snapshots/<rev>.usda`, with the workspace readers above resolving the
+  // archive's own folder — no second renderer and no host route.
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: SESSION_TAB_ID,
+    kind: SESSION_TAB_KIND,
+    // The extension band outranks the document preview's fallback text tab, so
+    // a manifest opens here; a `session.json` this body cannot read (absolute
+    // address, no Session to list through) is left to that tab instead.
+    priority: 'extension',
+    patterns: SESSION_TAB_PATTERNS,
+    canOpen: address => parseFileReference(address) !== undefined && isSessionArchiveName(usdFileName(address)),
+    title: address => usdFileName(address),
+  }), 'usd-3d-preview: session archive tab type')
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab',
+    key: SESSION_TAB_ID,
+    locale: NS,
+    inject: () => ({
+      readLayer: readers.readLayer,
+      readAsset: readers.readAsset,
+      listDirectory: readers.listDirectory,
+    }),
+  }, SessionTabBody)), 'usd-3d-preview: session archive tab body')
 
   // ── external assets: a page tab opened by dropping a stage or a model ──────
   ctx.effect(() => ctx.sidebarRightTabs.register({

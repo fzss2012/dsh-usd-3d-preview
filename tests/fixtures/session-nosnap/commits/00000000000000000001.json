@@ -1,0 +1,36 @@
+{
+  "created_at": "2026-11-20T00:00:01.000+00:00",
+  "command_id": "00000000-0000-4000-8000-0000000000aa",
+  "duration_ms": 9.0,
+  "model_rev": 1,
+  "object_ids": [
+    1
+  ],
+  "objects": [
+    {
+      "edges": 12,
+      "faces": 6,
+      "id": 1,
+      "kind": "Brep",
+      "manifold": true,
+      "name": "box",
+      "vertices": 8,
+      "volume": 1000.0
+    }
+  ],
+  "operation": "script.run",
+  "params": {},
+  "previous_model_rev": 0,
+  "replay": {
+    "kind": "script_run"
+  },
+  "response": {
+    "command_id": "00000000-0000-4000-8000-0000000000aa",
+    "model_rev": 1,
+    "object_id": 1
+  },
+  "source": "headless_init",
+  "source_line": "# script run",
+  "source_sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+  "source_text": "box = sm.create_box((0, 0, 0), 10, 10, 10)\n"
+}
